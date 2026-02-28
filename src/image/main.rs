@@ -1446,7 +1446,7 @@ fn run_convert(
             sealed_vmk_path,
             &attest_url_str,
             "scripts/initramfs-tools/hook.sh",
-            "scripts/initramfs-tools/attest.sh",
+            "scripts/initramfs-tools/attest-online.sh",
         )?;
     }
     fs::remove_file(sealed_vmk_path).context("Failed to remove sealed VMK")?;
