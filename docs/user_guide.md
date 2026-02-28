@@ -89,7 +89,7 @@ cargo run --bin snpguard-image convert \
 1. Uploads the sealed VMK into the guest image
 1. Installs `cryptsetup-initramfs` in the guest image
 1. Installs the SnpGuard client binary and configuration files
-1. Installs initramfs-tools hooks (`hook.sh` and `attest.sh`)
+1. Installs initramfs-tools hooks (`hook.sh` and `attest-online.sh`)
 1. Regenerates the initrd with hooks included
 1. Extracts boot artifacts (kernel, initrd, kernel parameters, firmware) to the staging directory
 
@@ -107,6 +107,63 @@ cargo run --bin snpguard-image convert \
 - The image tool lists the available kernels and initrd images with their kernel parameters. By default, the GRUB default kernel is selected automatically; if no default is set in the GRUB configuration, the first SEV-SNP supported entry is used. Pass `--pick-kernel` to be prompted to choose interactively instead.
 - The OVMF firmware binary must include `SNP_KERNEL_HASHES`, which is achieved by the special AmdSevX64 build. Refer to [this guide](https://rouming.github.io/2025/04/01/coco-with-amd-sev.html#guest-ovmf-firmware) to build OVMF with `SNP_KERNEL_HASHES` enabled.
 - For the image `convert` tool, if you've run `snpguard-client config login`, the attestation URL, ingestion public key, and CA certificate will be read from the stored configuration. Otherwise, you must provide them via `--attest-url`, `--ingestion-public-key`, and `--ca-cert` options.
+
+**Offline Attestation Mode (`--offline-attestation`)**
+
+By default the `convert` subcommand installs `attest-online.sh`, which contacts
+the snpguard service on every boot to obtain the VMK and unlock the rootfs.
+Pass `--offline-attestation` to install `attest-offline.sh` instead, which
+implements a two-slot LUKS strategy that eliminates the network dependency from
+steady-state boots:
+
+| LUKS slot | Key | Unlocked by |
+|-----------|-----|-------------|
+| 0 | Sealed VMK | Online attestation (snpguard service) |
+| 1 | Hardware-bound derived key | SEV-SNP chip (offline, no network) |
+
+The hardware-bound key is produced by the AMD Secure Processor using
+`snpguard-client derive-key` with the following fields mixed in:
+
+| Flag | What it binds |
+|------|---------------|
+| `--mix-measurement` | Launch digest (OVMF + kernel + initrd + cmdline). Also implicitly covers `id_key_digest` and `author_key_digest`, because the signed ID block that produces those digests commits to the measurement. |
+| `--mix-image-id` | UUID identifying the registered image. The server explicitly filters attestation records by `image_id`; this flag ensures the derived key is tied to the same registration. |
+| `--mix-policy` | Guest launch policy bitmask (controls hypervisor capabilities: debug mode, live migration, SMT, etc.). A policy change invalidates the offline key and forces re-enrollment via online attestation. |
+| `--vmpl 0` | Derives the key at VMPL 0, matching the server requirement that attestation reports must come from VMPL 0. |
+
+The key can only be reproduced by an identical guest image running on the
+same physical AMD chip under the same launch policy.
+
+**Boot flow:**
+
+1. The derived key is requested from the SEV-SNP chip (no network).
+2. LUKS slot 1 is tried with the derived key.  If it matches, the rootfs is
+   unlocked immediately and the boot continues — no network required.
+3. On failure (first boot or chip migration), the network is brought up and
+   online attestation is performed via the snpguard service (slot 0).
+4. After a successful online attestation the derived key is enrolled into slot 1
+   (replacing any stale key from a previous chip), so subsequent boots proceed
+   offline.
+
+**Network requirements:**
+
+- **First boot**: network is required to perform the initial online attestation
+  and enrol the derived key into slot 1.
+- **Subsequent boots on the same chip**: fully offline, no network needed.
+- **After chip migration** (VM moved to different AMD hardware): network is
+  required once on the new chip to re-enrol the derived key.  The VCEK is
+  chip-specific, so the derived key changes and slot 1 must be refreshed.
+  Once re-enrolled, subsequent boots on the new chip are again offline.
+
+```bash
+# Convert with offline attestation support
+cargo run --bin snpguard-image convert \
+  --in-image ./debian-13-genericcloud-amd64.qcow2 \
+  --out-image confidential.qcow2 \
+  --out-staging ./staging \
+  --firmware ./OVMF.AMDSEV.fd \
+  --offline-attestation
+```
 
 **Staging Directory Contents:**
 

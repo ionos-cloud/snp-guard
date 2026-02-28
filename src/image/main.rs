@@ -114,6 +114,12 @@ enum Command {
         /// default is set.
         #[arg(long)]
         pick_kernel: bool,
+        /// Install the offline attestation script (attest-offline.sh) instead of the default
+        /// online-only script. The offline script derives a hardware-bound key from the SEV-SNP
+        /// chip (VCEK + launch measurement) and stores it in LUKS slot 1 after the first
+        /// successful online attestation, allowing subsequent boots to proceed without network.
+        #[arg(long)]
+        offline_attestation: bool,
     },
     /// Embed boot artifacts into a QCOW2 image
     Embed {
@@ -1215,6 +1221,7 @@ fn run_convert(
     firmware: PathBuf,
     no_hardening: bool,
     pick_kernel: bool,
+    offline_attestation: bool,
 ) -> Result<()> {
     // Load config if available
     let config = load_config().ok();
@@ -1446,7 +1453,11 @@ fn run_convert(
             sealed_vmk_path,
             &attest_url_str,
             "scripts/initramfs-tools/hook.sh",
-            "scripts/initramfs-tools/attest-online.sh",
+            if offline_attestation {
+                "scripts/initramfs-tools/attest-offline.sh"
+            } else {
+                "scripts/initramfs-tools/attest-online.sh"
+            },
         )?;
     }
     fs::remove_file(sealed_vmk_path).context("Failed to remove sealed VMK")?;
@@ -1730,6 +1741,7 @@ fn main() -> Result<()> {
             firmware,
             no_hardening,
             pick_kernel,
+            offline_attestation,
         } => run_convert(
             &in_image,
             &out_image,
@@ -1740,6 +1752,7 @@ fn main() -> Result<()> {
             firmware,
             no_hardening,
             pick_kernel,
+            offline_attestation,
         ),
         Command::Embed { image, in_bundle } => run_embed(&image, &in_bundle),
     }
