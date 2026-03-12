@@ -1225,6 +1225,16 @@ fn run_convert(
     pick_kernel: bool,
     offline_attestation: bool,
 ) -> Result<()> {
+    let musl_client_path = "target/x86_64-unknown-linux-musl/release/snpguard-client";
+
+    // Verify musl client binary is present before doing any expensive work.
+    if !no_hardening && !Path::new(musl_client_path).exists() {
+        bail!(
+            "snpguard-client (musl) not found at {musl_client_path}\n\
+             Build it first:\n  make build-image"
+        );
+    }
+
     // Load config if available
     let config = load_config().ok();
 
@@ -1450,7 +1460,7 @@ fn run_convert(
             &vmk,
             &supported_entries,
             &boot_partition,
-            "target/x86_64-unknown-linux-musl/release/snpguard-client",
+            musl_client_path,
             ca_cert_path_str,
             sealed_vmk_path,
             &attest_url_str,
