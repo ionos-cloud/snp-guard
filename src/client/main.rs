@@ -20,6 +20,10 @@ use sha2::{Digest, Sha256, Sha512};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+// Default timeout for all client requests
+const TIMEOUT_SECS: u64 = 60;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "SnpGuard client")]
@@ -296,6 +300,7 @@ fn build_client_from_bytes(ca_pem: &[u8]) -> Result<reqwest::Client> {
         .danger_accept_invalid_certs(false)
         .tls_built_in_root_certs(false)
         .add_root_certificate(ca_cert)
+        .timeout(Duration::from_secs(TIMEOUT_SECS))
         .build()
         .context("Failed to create HTTP client with pinned CA")?;
     Ok(client)
@@ -799,6 +804,7 @@ async fn run_config(action: ConfigCmd) -> Result<()> {
             println!("Requesting server public information...");
             let insecure_client = reqwest::Client::builder()
                 .danger_accept_invalid_certs(true)
+                .timeout(Duration::from_secs(TIMEOUT_SECS))
                 .build()
                 .context("Failed to create insecure HTTP client")?;
 
