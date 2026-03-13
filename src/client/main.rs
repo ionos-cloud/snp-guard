@@ -33,16 +33,27 @@ struct Cli {
 }
 
 #[derive(Subcommand, Debug)]
+enum AttestCmd {
+    /// Perform online attestation and output the released secret
+    Report {
+        #[arg(long, value_name = "PATH")]
+        sealed_blob: PathBuf,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 #[allow(clippy::large_enum_variant)]
 enum Command {
     /// Perform attestation and output the released secret
     Attest {
-        #[arg(long, value_name = "URL")]
-        url: String,
-        #[arg(long, value_name = "PATH")]
+        #[arg(long, value_name = "URL",
+              help = "Attestation service URL [default: contents of /etc/snpguard/attest.url]")]
+        url: Option<String>,
+        #[arg(long, value_name = "PATH", default_value = "/etc/snpguard/ca.pem",
+              help = "Path to the CA certificate used to verify the attestation service TLS certificate")]
         ca_cert: String,
-        #[arg(long, value_name = "PATH")]
-        sealed_blob: PathBuf,
+        #[command(subcommand)]
+        action: AttestCmd,
     },
     /// Management operations (requires stored token)
     Manage {
@@ -189,11 +200,21 @@ enum ManageCmd {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        Command::Attest {
-            url,
-            ca_cert,
-            sealed_blob,
-        } => run_attest(&url, &ca_cert, &sealed_blob).await,
+        Command::Attest { url, ca_cert, action } => {
+            let base = if let Some(u) = url {
+                normalize_https(&u)?
+            } else {
+                let raw = fs::read_to_string("/etc/snpguard/attest.url")
+                    .context("--url not given and /etc/snpguard/attest.url not found")?;
+                normalize_https(raw.trim())?
+            };
+            let ca_path = ca_cert;
+            match action {
+                AttestCmd::Report { sealed_blob } => {
+                    run_attest_report(&base, &ca_path, &sealed_blob).await
+                }
+            }
+        }
         Command::Manage {
             url,
             ca_cert,
@@ -322,7 +343,7 @@ fn build_client_from_bytes(ca_pem: &[u8]) -> Result<reqwest::Client> {
     Ok(client)
 }
 
-async fn run_attest(url: &str, ca_cert: &str, sealed_blob: &Path) -> Result<()> {
+async fn run_attest_report(url: &str, ca_cert: &str, sealed_blob: &Path) -> Result<()> {
     let client = build_client(ca_cert)?;
     let base = normalize_https(url)?;
     let mut rng = OsRng;
