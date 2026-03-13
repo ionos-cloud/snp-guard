@@ -421,7 +421,13 @@ pub async fn verify_report_core(
 }
 
 /// Build an AttestationRecord proto from a registration + its current attestation record.
-fn build_proto_record(reg: vm_registration::Model, rec: vm::Model) -> AttestationRecord {
+/// pending: optional pending attestation_record; if present, pending_since is set.
+fn build_proto_record(
+    reg: vm_registration::Model,
+    rec: vm::Model,
+    pending: Option<&vm::Model>,
+) -> AttestationRecord {
+    let pending_since = pending.map(|p| p.created_at.and_utc().timestamp());
     AttestationRecord {
         id: reg.id,
         os_name: reg.os_name,
@@ -441,6 +447,7 @@ fn build_proto_record(reg: vm_registration::Model, rec: vm::Model) -> Attestatio
         min_tcb_tee: rec.min_tcb_tee as u32,
         min_tcb_snp: rec.min_tcb_snp as u32,
         min_tcb_microcode: rec.min_tcb_microcode as u32,
+        pending_since,
     }
 }
 
@@ -453,13 +460,19 @@ pub async fn list_records_core(
         .await
         .map_err(|e| format!("Database error: {}", e))?;
 
-    let record_ids: Vec<String> = registrations
+    // Collect current record IDs and pending record IDs (where present).
+    let mut all_record_ids: Vec<String> = registrations
         .iter()
         .map(|r| r.current_record_id.clone())
         .collect();
+    for reg in &registrations {
+        if let Some(pid) = &reg.pending_record_id {
+            all_record_ids.push(pid.clone());
+        }
+    }
 
     let records = vm::Entity::find()
-        .filter(vm::Column::Id.is_in(record_ids))
+        .filter(vm::Column::Id.is_in(all_record_ids))
         .all(&state.db)
         .await
         .map_err(|e| format!("Database error: {}", e))?;
@@ -471,7 +484,11 @@ pub async fn list_records_core(
         .into_iter()
         .filter_map(|reg| {
             let rec = record_map.get(&reg.current_record_id)?.clone();
-            Some(build_proto_record(reg, rec))
+            let pending = reg
+                .pending_record_id
+                .as_ref()
+                .and_then(|pid| record_map.get(pid));
+            Some(build_proto_record(reg, rec, pending))
         })
         .collect();
 
@@ -504,7 +521,16 @@ pub async fn get_record_core(
             )
         })?;
 
-    Ok(Some(build_proto_record(reg, rec)))
+    let pending = if let Some(ref pid) = reg.pending_record_id {
+        vm::Entity::find_by_id(pid)
+            .one(&state.db)
+            .await
+            .map_err(|e| format!("Database error: {}", e))?
+    } else {
+        None
+    };
+
+    Ok(Some(build_proto_record(reg, rec, pending.as_ref())))
 }
 
 pub async fn create_record_core(

@@ -971,6 +971,7 @@ fn print_record(r: &common::snpguard::AttestationRecord, json: bool) -> Result<(
             min_tcb_snp: u32,
             min_tcb_microcode: u32,
             created_at: &'a str,
+            pending_since: Option<i64>,
         }
         let jr = JsonRecord {
             id: &r.id,
@@ -991,6 +992,7 @@ fn print_record(r: &common::snpguard::AttestationRecord, json: bool) -> Result<(
             min_tcb_snp: r.min_tcb_snp,
             min_tcb_microcode: r.min_tcb_microcode,
             created_at: &r.created_at,
+            pending_since: r.pending_since,
         };
         let val = serde_json::to_string_pretty(&jr)?;
         println!("{}", val);
@@ -1013,6 +1015,12 @@ fn print_record(r: &common::snpguard::AttestationRecord, json: bool) -> Result<(
         print_kv("Min TCB SNP", &r.min_tcb_snp.to_string());
         print_kv("Min TCB Microcode", &r.min_tcb_microcode.to_string());
         print_kv("Created At", &r.created_at);
+        if let Some(ts) = r.pending_since {
+            let dt = chrono::DateTime::from_timestamp(ts, 0)
+                .map(|d| d.format("%Y-%m-%d %H:%M UTC").to_string())
+                .unwrap_or_else(|| ts.to_string());
+            print_kv("Pending Renewal", &format!("yes, since {}", dt));
+        }
     }
     Ok(())
 }
@@ -1025,6 +1033,7 @@ fn print_list(records: Vec<common::snpguard::AttestationRecord>, json: bool) -> 
             os_name: &'a str,
             request_count: i32,
             enabled: bool,
+            pending_since: Option<i64>,
         }
         let out: Vec<JsonRec> = records
             .iter()
@@ -1033,20 +1042,26 @@ fn print_list(records: Vec<common::snpguard::AttestationRecord>, json: bool) -> 
                 os_name: &r.os_name,
                 request_count: r.request_count,
                 enabled: r.enabled,
+                pending_since: r.pending_since,
             })
             .collect();
         let val = serde_json::to_string_pretty(&out)?;
         println!("{}", val);
     } else {
         println!(
-            "{:<36}  {:<24}  {:>8}  {:<8}",
-            "ID", "OS NAME", "REQUESTS", "STATUS"
+            "{:<36}  {:<24}  {:>8}  {:<8}  {:<7}",
+            "ID", "OS NAME", "REQUESTS", "STATUS", "RENEWAL"
         );
         for r in records {
             let status = if r.enabled { "enabled" } else { "disabled" };
+            let renewal = if r.pending_since.is_some() {
+                "pending"
+            } else {
+                "-"
+            };
             println!(
-                "{:<36}  {:<24}  {:>8}  {:<8}",
-                r.id, r.os_name, r.request_count, status
+                "{:<36}  {:<24}  {:>8}  {:<8}  {:<7}",
+                r.id, r.os_name, r.request_count, status, renewal
             );
         }
     }

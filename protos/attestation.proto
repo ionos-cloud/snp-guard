@@ -143,4 +143,7 @@ message AttestationRecord {
   uint32 min_tcb_snp = 18;   // Minimum SNP implementation version
   uint32 min_tcb_microcode = 19; // Minimum CPU microcode version
   uint32 vcpus = 20;
+  // Unix epoch seconds at which the pending renewal was created.
+  // Present only when a renewal is in flight; absence means no pending renewal.
+  optional int64 pending_since = 21;
 }
