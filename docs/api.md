@@ -153,7 +153,13 @@ Endpoints (protobuf payloads, `application/x-protobuf`):
 - `POST /v1/records/{id}/enable`, `/disable`
 - `GET/POST /v1/tokens`, `POST /v1/tokens/{id}/revoke`
 
-**Note**: Attestation records are immutable. To make changes, delete the old record and create a new one.
+**Renewal**: A running VM can update its kernel, initrd, firmware, or kernel parameters without
+re-registering.  Use `POST /v1/attest/renew` (public endpoint, authenticated via SNP report).
+The server creates a pending attestation record; the pending record is promoted to current
+automatically on the next successful attestation using the new image_id.
+
+**Note**: Management records are immutable via the management API. Use the renewal flow for
+in-place artifact updates on running VMs.
 
 ### Endpoints
 
