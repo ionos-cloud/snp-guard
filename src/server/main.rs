@@ -112,6 +112,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/download/:id/:file", get(web::download_artifact))
         .route("/logout", get(web::logout))
         .route("/toggle/:id", post(web::toggle_enabled))
+        .route("/discard-pending/:id", post(web::discard_pending))
         .route("/tokens", get(web::tokens_page).post(web::create_token))
         .route("/tokens/:id/revoke", post(web::revoke_token))
         .nest_service("/static", ServeDir::new("ui/static"))

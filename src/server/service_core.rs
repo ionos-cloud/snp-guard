@@ -804,6 +804,23 @@ pub async fn get_pending_artifact_dir(
     Ok(state.data_paths.attestations_dir.join(&pending_id))
 }
 
+/// Returns the kernel_params of the pending record, or None if no renewal is in flight.
+pub async fn get_pending_kernel_params(
+    state: &Arc<ServiceState>,
+    registration_id: &str,
+) -> Option<String> {
+    let reg = vm_registration::Entity::find_by_id(registration_id)
+        .one(&state.db)
+        .await
+        .ok()??;
+    let pending_id = reg.pending_record_id?;
+    let rec = vm::Entity::find_by_id(&pending_id)
+        .one(&state.db)
+        .await
+        .ok()??;
+    rec.kernel_params
+}
+
 fn hash_token(token: &str) -> Result<String, String> {
     let salt = SaltString::generate(&mut rand::thread_rng());
     Argon2::default()

@@ -27,6 +27,9 @@
                     {% else %}
                         <span class="inline-flex items-center px-3 py-1 rounded-full bg-red-100 text-red-700 text-xs font-semibold">Disabled</span>
                     {% endif %}
+                    {% if vm.pending_since.is_some() %}
+                        <span class="inline-flex items-center px-3 py-1 rounded-full bg-amber-100 text-amber-700 text-xs font-semibold ml-1">renewal pending</span>
+                    {% endif %}
                 </td>
                 <td class="py-4 px-6 text-right">
                     <a href="/delete/{{ vm.id }}" class="text-red-600 hover:underline font-semibold text-sm">Delete</a>

@@ -18,6 +18,20 @@
         </div>
     </div>
     
+    {% if has_pending %}
+    <div class="bg-amber-50 border-l-4 border-amber-400 p-4 rounded-r-lg mb-6">
+        <div class="flex items-start">
+            <div class="ml-3">
+                <p class="text-sm font-semibold text-amber-800">Renewal in flight since {{ pending_since_str }}</p>
+                <p class="text-sm text-amber-700 mt-1">
+                    Attesting with the pending artifacts will automatically promote them to current.
+                    Until then the VM boots from the current artifacts below.
+                </p>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
     <div class="space-y-8">
         <!-- Basic Information -->
         <div class="bg-gradient-to-r from-blue-50 to-indigo-50 p-6 rounded-lg border border-blue-100">
@@ -64,6 +78,12 @@
                 <label class="block text-xs font-semibold text-slate-500 uppercase mb-1">Kernel Parameters</label>
                 <p class="text-base font-mono text-slate-800 bg-white px-3 py-2 rounded border border-slate-200 whitespace-pre-wrap">{{ vm.kernel_params }}</p>
             </div>
+            {% if has_pending %}
+            <div class="mb-4">
+                <label class="block text-xs font-semibold text-amber-600 uppercase mb-1">Kernel Parameters (pending)</label>
+                <p class="text-base font-mono text-slate-800 bg-amber-50 px-3 py-2 rounded border border-amber-200 whitespace-pre-wrap">{{ pending_kernel_params }}</p>
+            </div>
+            {% endif %}
         </div>
 
         <!-- Policy Flags -->
@@ -211,16 +231,70 @@
             </div>
         </div>
 
-        <!-- Immutability Notice -->
-        <div class="bg-yellow-50 border-l-4 border-yellow-400 p-4 rounded-r-lg mt-8">
-            <div class="flex items-start">
-                <div class="flex-shrink-0">
-                    <span class="text-yellow-600 text-xl">ℹ️</span>
+        {% if has_pending %}
+        <!-- Pending Renewal Artifacts -->
+        <div class="bg-gradient-to-r from-amber-50 to-yellow-50 p-6 rounded-lg border border-amber-200 mt-8">
+            <div class="flex justify-between items-center mb-4">
+                <h3 class="text-lg font-bold text-slate-700 flex items-center">
+                    <span class="w-2 h-2 bg-amber-500 rounded-full mr-2"></span>
+                    Pending Renewal Artifacts
+                </h3>
+                <form action="/discard-pending/{{ vm.id }}" method="POST">
+                    <button type="submit" class="px-4 py-2 bg-red-600 hover:bg-red-700 text-white text-sm font-medium rounded-lg shadow transition"
+                        onclick="return confirm('Discard the pending renewal? This cannot be undone.')">
+                        Discard Pending
+                    </button>
+                </form>
+            </div>
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+                <div class="bg-white p-4 rounded-lg border border-amber-200">
+                    <p class="text-xs font-semibold text-slate-500 uppercase mb-2">Firmware Image</p>
+                    <a href="/download/{{ vm.id }}/firmware-code.fd?pending=true" class="text-amber-600 hover:text-amber-800 hover:underline font-medium text-sm flex items-center">
+                        <span class="mr-2">&#128230;</span> Download firmware-code.fd
+                    </a>
                 </div>
+                <div class="bg-white p-4 rounded-lg border border-amber-200">
+                    <p class="text-xs font-semibold text-slate-500 uppercase mb-2">Kernel Binary</p>
+                    <a href="/download/{{ vm.id }}/vmlinuz?pending=true" class="text-amber-600 hover:text-amber-800 hover:underline font-medium text-sm flex items-center">
+                        <span class="mr-2">&#128230;</span> Download vmlinuz
+                    </a>
+                </div>
+                <div class="bg-white p-4 rounded-lg border border-amber-200">
+                    <p class="text-xs font-semibold text-slate-500 uppercase mb-2">Initrd Image</p>
+                    <a href="/download/{{ vm.id }}/initrd.img?pending=true" class="text-amber-600 hover:text-amber-800 hover:underline font-medium text-sm flex items-center">
+                        <span class="mr-2">&#128230;</span> Download initrd.img
+                    </a>
+                </div>
+            </div>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div class="bg-white p-4 rounded-lg border border-amber-200">
+                    <p class="text-xs font-semibold text-slate-500 uppercase mb-2">Key Blocks</p>
+                    <div class="space-y-2">
+                        <a href="/download/{{ vm.id }}/id-block.bin?pending=true" class="block text-amber-600 hover:text-amber-800 hover:underline font-medium text-sm">Download ID-Block</a>
+                        <a href="/download/{{ vm.id }}/id-auth.bin?pending=true" class="block text-amber-600 hover:text-amber-800 hover:underline font-medium text-sm">Download Auth-Block</a>
+                    </div>
+                </div>
+                <div class="bg-white p-4 rounded-lg border border-amber-200">
+                    <p class="text-xs font-semibold text-slate-500 uppercase mb-2">Packages</p>
+                    <div class="space-y-2">
+                        <a href="/download/{{ vm.id }}/artifacts.tar.gz?pending=true" class="block text-amber-600 hover:text-amber-800 hover:underline font-bold text-sm">Download Tarball (tar.gz)</a>
+                        <a href="/download/{{ vm.id }}/artifacts.squashfs?pending=true" class="block text-amber-600 hover:text-amber-800 hover:underline font-bold text-sm">Download SquashFS</a>
+                    </div>
+                </div>
+            </div>
+        </div>
+        {% endif %}
+
+        <!-- Update note -->
+        <div class="bg-blue-50 border-l-4 border-blue-400 p-4 rounded-r-lg mt-8">
+            <div class="flex items-start">
                 <div class="ml-3">
-                    <p class="text-sm font-semibold text-yellow-800">Record Immutability</p>
-                    <p class="text-sm text-yellow-700 mt-1">
-                        Attestation records are immutable. To make changes, delete this record and create a new one with updated values.
+                    <p class="text-sm font-semibold text-blue-800">Updating Boot Artifacts</p>
+                    <p class="text-sm text-blue-700 mt-1">
+                        To update kernel, initrd, firmware, or kernel parameters, run
+                        <code class="bg-blue-100 px-1 rounded">snpguard-client attest renew</code>
+                        from inside the running VM. The renewed artifacts become active after
+                        the next successful attestation.
                     </p>
                 </div>
             </div>

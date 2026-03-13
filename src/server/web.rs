@@ -5,7 +5,7 @@ use crate::service_core::{self, ServiceState, TokenInfo};
 use askama::Template;
 use axum::{
     body::Body,
-    extract::{Extension, Form, Multipart, Path},
+    extract::{Extension, Form, Multipart, Path, Query},
     response::{Html, IntoResponse, Redirect},
 };
 use chrono::Duration;
@@ -27,6 +27,15 @@ struct CreateTemplate {}
 #[template(path = "edit.html")]
 struct EditTemplate {
     vm: AttestationRecord,
+    has_pending: bool,
+    pending_since_str: String,
+    pending_kernel_params: String,
+}
+
+#[derive(serde::Deserialize, Default)]
+pub struct DownloadParams {
+    #[serde(default)]
+    pub pending: bool,
 }
 
 #[derive(Template)]
@@ -307,7 +316,25 @@ pub async fn view_record(
 ) -> impl IntoResponse {
     match service_core::get_record_core(&state, id).await {
         Ok(Some(vm)) => {
-            let template = EditTemplate { vm };
+            let has_pending = vm.pending_since.is_some();
+            let pending_since_str = vm
+                .pending_since
+                .and_then(|ts| chrono::DateTime::<chrono::Utc>::from_timestamp(ts, 0))
+                .map(|dt| dt.format("%Y-%m-%d %H:%M UTC").to_string())
+                .unwrap_or_default();
+            let pending_kernel_params = if has_pending {
+                service_core::get_pending_kernel_params(&state, &vm.id)
+                    .await
+                    .unwrap_or_else(|| "(inherited from current)".to_string())
+            } else {
+                String::new()
+            };
+            let template = EditTemplate {
+                vm,
+                has_pending,
+                pending_since_str,
+                pending_kernel_params,
+            };
             match template.render() {
                 Ok(html) => Html(html).into_response(),
                 Err(e) => Html(format!("Template error: {}", e)).into_response(),
@@ -317,6 +344,20 @@ pub async fn view_record(
         Err(e) => {
             Html(format!("<h1>Error</h1><p>Failed to load record: {}</p>", e)).into_response()
         }
+    }
+}
+
+pub async fn discard_pending(
+    Extension(state): Extension<Arc<ServiceState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match service_core::discard_pending_core(&state, id.clone()).await {
+        Ok(_) => Redirect::to(&format!("/view/{}", id)).into_response(),
+        Err(e) => Html(format!(
+            "<h1>Error</h1><p>Failed to discard pending renewal: {}</p>",
+            e
+        ))
+        .into_response(),
     }
 }
 
@@ -458,6 +499,7 @@ pub async fn logout() -> impl IntoResponse {
 pub async fn download_artifact(
     Extension(state): Extension<Arc<ServiceState>>,
     Path((id, file_name)): Path<(String, String)>,
+    Query(params): Query<DownloadParams>,
 ) -> impl IntoResponse {
     // Strip to bare filename to block both relative (../../) and absolute (/etc/)
     // path traversal.  Path::new().file_name() returns None for "." and "..".
@@ -469,9 +511,16 @@ pub async fn download_artifact(
         None => return "Invalid filename".into_response(),
     };
 
-    let artifact_dir = match service_core::get_current_artifact_dir(&state, &id).await {
-        Ok(p) => p,
-        Err(e) => return format!("Record not found: {}", e).into_response(),
+    let artifact_dir = if params.pending {
+        match service_core::get_pending_artifact_dir(&state, &id).await {
+            Ok(p) => p,
+            Err(e) => return format!("No pending renewal: {}", e).into_response(),
+        }
+    } else {
+        match service_core::get_current_artifact_dir(&state, &id).await {
+            Ok(p) => p,
+            Err(e) => return format!("Record not found: {}", e).into_response(),
+        }
     };
 
     // For archive formats (.tar.gz / .squashfs) regenerate on demand;
