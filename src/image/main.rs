@@ -1,10 +1,9 @@
-mod grub_parser;
 mod local_ops;
 
 use anyhow::{anyhow, bail, Context, Result};
+use boot::grub::{self, GrubEntry};
 use clap::{Parser, Subcommand};
 use dirs::config_dir;
-use grub_parser::GrubEntry;
 use hpke::{
     aead::AesGcm256,
     kdf::HkdfSha256,
@@ -485,12 +484,8 @@ enum BootPartition {
 fn inspect_source_image_boot_data(
     g: &guestfs::Handle,
     source_rootfs: &str,
-) -> Result<(
-    Vec<grub_parser::GrubEntry>,
-    Vec<grub_parser::GrubEntry>,
-    BootPartition,
-)> {
-    use grub_parser::parse_grub_cfg_from_str;
+) -> Result<(Vec<grub::GrubEntry>, Vec<grub::GrubEntry>, BootPartition)> {
+    use grub::parse_grub_cfg_from_str;
     use guestfs::{IsFileOptArgs, UmountOptArgs};
 
     // Mount source rootfs read-only
@@ -587,8 +582,8 @@ fn inspect_source_image_boot_data(
     let grub_str = String::from_utf8(grub_content)
         .map_err(|e| anyhow!("Failed to convert grub.cfg to UTF-8: {}", e))?;
 
-    // Parse GRUB configuration
-    let entries = parse_grub_cfg_from_str(&grub_str)
+    // Parse GRUB configuration; the parser collapses entries sharing a kernel binary.
+    let entries = parse_grub_cfg_from_str(&grub_str, true)
         .map_err(|e| anyhow!("Failed to parse grub.cfg: {}", e))?;
 
     if entries.is_empty() {
@@ -645,8 +640,8 @@ fn extract_boot_data(
     scratch_rootfs: &str,
     target_rootfs: &str,
     vmk: &[u8],
-    supported_entries: &[grub_parser::GrubEntry],
-    unsupported_entries: &[grub_parser::GrubEntry],
+    supported_entries: &[grub::GrubEntry],
+    unsupported_entries: &[grub::GrubEntry],
     boot_partition: &BootPartition,
     no_hardening: bool,
     pick_kernel: bool,
@@ -758,7 +753,7 @@ fn extract_boot_data(
     }
 
     // Select entry from supported list only
-    let selected_entry: &grub_parser::GrubEntry = if supported_entries.is_empty() {
+    let selected_entry: &grub::GrubEntry = if supported_entries.is_empty() {
         bail!("No SEV-SNP supported kernels found. Cannot proceed.");
     } else if supported_entries.len() == 1 {
         // Single supported entry - use it automatically

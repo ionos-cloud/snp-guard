@@ -11,11 +11,25 @@ pub struct GrubEntry {
     pub is_default: bool,
 }
 
-/// Parse GRUB configuration from a string
-pub fn parse_grub_cfg_from_str(content: &str) -> io::Result<Vec<GrubEntry>> {
+/// Parse GRUB configuration from a string.
+///
+/// When `unique_entries` is true, entries sharing the same kernel binary
+/// (e.g. normal boot and recovery mode) are collapsed to one representative;
+/// the first occurrence is kept, which is typically the default entry because
+/// grub lists it first.
+pub fn parse_grub_cfg_from_str(content: &str, unique_entries: bool) -> io::Result<Vec<GrubEntry>> {
     use std::io::Cursor;
     let reader = io::BufReader::new(Cursor::new(content));
-    parse_grub_cfg_from_reader(reader)
+    let entries = parse_grub_cfg_from_reader(reader)?;
+    if unique_entries {
+        let mut seen: HashSet<String> = HashSet::new();
+        Ok(entries
+            .into_iter()
+            .filter(|e| seen.insert(e.kernel.clone()))
+            .collect())
+    } else {
+        Ok(entries)
+    }
 }
 
 /// Deduplicate GRUB entries, preserving an order

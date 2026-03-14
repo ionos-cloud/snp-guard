@@ -9,6 +9,7 @@ path = "main.rs"
 
 [dependencies]
 common = { path = "../common" }
+boot = { path = "../boot" }
 anyhow = "1.0"
 clap = { version = "4.4", features = ["derive"] }
 dirs = "5"
@@ -21,7 +22,6 @@ guestfs = "0.1"
 hex = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-regex = "1"
 flate2 = "1.0"
 cpio = "0.4.1"
 zstd = "0.13"

@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "src/common",
+    "src/boot",
     "src/client",
     "src/server",
     "src/image",
