@@ -3,7 +3,7 @@ use clap::{Parser, Subcommand};
 use common::snpguard::{
     AttestationRequest, AttestationResponse, CreateRecordRequest, CreateRecordResponse,
     DeleteRecordResponse, GetRecordResponse, ListRecordsResponse, NonceRequest, NonceResponse,
-    ToggleEnabledResponse,
+    RenewRequest, RenewRequestPayload, RenewResponse, RenewResponsePayload, ToggleEnabledResponse,
 };
 use dirs::config_dir;
 use hpke::{
@@ -14,6 +14,7 @@ use hpke::{
 };
 use prost::Message;
 use rand::rngs::OsRng;
+use rand::RngCore;
 use reqwest::Certificate;
 use sev::firmware::guest::{DerivedKey, Firmware, GuestFieldSelect};
 use sha2::{Digest, Sha256, Sha512};
@@ -39,18 +40,47 @@ enum AttestCmd {
         #[arg(long, value_name = "PATH")]
         sealed_blob: PathBuf,
     },
+    /// Request a renewal of the current attestation record from inside the running VM
+    Renew {
+        /// Path to the server Ed25519 identity public key (PEM) used to verify the response
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "/etc/snpguard/identity.pub"
+        )]
+        identity_pub: String,
+        /// Staging directory: artifacts are read from here as input
+        /// and the response artifacts are written back.
+        #[arg(long, value_name = "PATH")]
+        staging_dir: Option<PathBuf>,
+        #[arg(long)]
+        firmware: Option<PathBuf>,
+        #[arg(long)]
+        kernel: Option<PathBuf>,
+        #[arg(long)]
+        initrd: Option<PathBuf>,
+        #[arg(long)]
+        kernel_params: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
 #[allow(clippy::large_enum_variant)]
 enum Command {
-    /// Perform attestation and output the released secret
+    /// Attestation operations (report, renew)
     Attest {
-        #[arg(long, value_name = "URL",
-              help = "Attestation service URL [default: contents of /etc/snpguard/attest.url]")]
+        #[arg(
+            long,
+            value_name = "URL",
+            help = "Attestation service URL [default: contents of /etc/snpguard/attest.url]"
+        )]
         url: Option<String>,
-        #[arg(long, value_name = "PATH", default_value = "/etc/snpguard/ca.pem",
-              help = "Path to the CA certificate used to verify the attestation service TLS certificate")]
+        #[arg(
+            long,
+            value_name = "PATH",
+            default_value = "/etc/snpguard/ca.pem",
+            help = "Path to the CA certificate used to verify the attestation service TLS certificate"
+        )]
         ca_cert: String,
         #[command(subcommand)]
         action: AttestCmd,
@@ -233,7 +263,11 @@ enum ManageCmd {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        Command::Attest { url, ca_cert, action } => {
+        Command::Attest {
+            url,
+            ca_cert,
+            action,
+        } => {
             let base = if let Some(u) = url {
                 normalize_https(&u)?
             } else {
@@ -245,6 +279,26 @@ async fn main() -> Result<()> {
             match action {
                 AttestCmd::Report { sealed_blob } => {
                     run_attest_report(&base, &ca_path, &sealed_blob).await
+                }
+                AttestCmd::Renew {
+                    identity_pub,
+                    staging_dir,
+                    firmware,
+                    kernel,
+                    initrd,
+                    kernel_params,
+                } => {
+                    run_attest_renew(
+                        &base,
+                        &ca_path,
+                        &identity_pub,
+                        staging_dir.as_deref(),
+                        firmware.as_deref(),
+                        kernel.as_deref(),
+                        initrd.as_deref(),
+                        kernel_params.as_deref(),
+                    )
+                    .await
                 }
             }
         }
@@ -470,6 +524,160 @@ async fn run_attest_report(url: &str, ca_cert: &str, sealed_blob: &Path) -> Resu
     // Output VMK to stdout in hex format
     let vmk_hex = hex::encode(&vmk);
     println!("{}", vmk_hex);
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_attest_renew(
+    url: &str,
+    ca_cert: &str,
+    identity_pub: &str,
+    staging_dir: Option<&Path>,
+    firmware: Option<&Path>,
+    kernel: Option<&Path>,
+    initrd: Option<&Path>,
+    kernel_params: Option<&str>,
+) -> Result<()> {
+    let client = build_client(ca_cert)?;
+    let base = normalize_https(url)?;
+
+    // Collect optional artifact bytes
+    let mut firmware_data: Option<Vec<u8>> = None;
+    let mut kernel_data: Option<Vec<u8>> = None;
+    let mut initrd_data: Option<Vec<u8>> = None;
+    let mut params_data: Option<String> = None;
+
+    if let Some(dir) = staging_dir {
+        let (fw, k, i, p, _) = read_staging_dir(dir)?;
+        firmware_data = fw;
+        kernel_data = k;
+        initrd_data = i;
+        params_data = p;
+    }
+
+    if let Some(path) = firmware {
+        firmware_data = Some(fs::read(path)?);
+    }
+    if let Some(path) = kernel {
+        kernel_data = Some(fs::read(path)?);
+    }
+    if let Some(path) = initrd {
+        initrd_data = Some(fs::read(path)?);
+    }
+    if let Some(p) = kernel_params {
+        params_data = Some(p.to_string());
+    }
+
+    // Fetch a fresh server nonce to prove request freshness.
+    let mut buf = Vec::new();
+    NonceRequest {}.encode(&mut buf)?;
+    let resp = client
+        .post(format!("{}/v1/attest/nonce", base))
+        .header("Content-Type", "application/x-protobuf")
+        .body(buf)
+        .send()
+        .await
+        .context("Failed to request nonce")?;
+    let resp = ensure_success(resp, "nonce").await?;
+    let bytes = resp.bytes().await?;
+    let nonce_resp = NonceResponse::decode(&bytes[..]).context("Decode nonce response")?;
+    if nonce_resp.nonce.len() != 64 {
+        bail!("Invalid nonce length: {}", nonce_resp.nonce.len());
+    }
+    let server_nonce = nonce_resp.nonce;
+
+    // Generate a 64-byte client nonce to prevent replay of signed responses.
+    let mut client_nonce = vec![0u8; 64];
+    OsRng.fill_bytes(&mut client_nonce);
+
+    // Encode RenewRequestPayload once; the SNP report_data will be SHA512 of these bytes.
+    // server_nonce is included inside so no separate concatenation is needed.
+    let payload = RenewRequestPayload {
+        server_nonce: server_nonce.clone(),
+        client_nonce: client_nonce.clone(),
+        firmware: firmware_data,
+        kernel: kernel_data,
+        initrd: initrd_data,
+        kernel_params: params_data,
+    };
+    let mut payload_bytes = Vec::new();
+    payload.encode(&mut payload_bytes)?;
+
+    let binding_digest: [u8; 64] = Sha512::digest(&payload_bytes).into();
+
+    // Request an SNP attestation report that binds the payload via report_data.
+    let mut fw = Firmware::open().context(
+        "Failed to open SEV firmware device (/dev/sev-guest). Ensure SEV-SNP is enabled.",
+    )?;
+    let report_bytes = fw
+        .get_report(None, Some(binding_digest), Some(0))
+        .context("Failed to get attestation report from SEV firmware")?;
+
+    let req = RenewRequest {
+        report_data: report_bytes.to_vec(),
+        payload_bytes: payload_bytes.clone(),
+    };
+    let mut req_bytes = Vec::new();
+    req.encode(&mut req_bytes)?;
+
+    let resp = client
+        .post(format!("{}/v1/attest/renew", base))
+        .header("Content-Type", "application/x-protobuf")
+        .body(req_bytes)
+        .send()
+        .await
+        .context("Failed to send renewal request")?;
+    let resp = ensure_success(resp, "renew").await?;
+    let bytes = resp.bytes().await?;
+    let renew_resp = RenewResponse::decode(&bytes[..]).context("Decode renewal response")?;
+
+    if !renew_resp.success {
+        bail!(
+            "Renewal failed: {}",
+            renew_resp.error_message.unwrap_or_default()
+        );
+    }
+
+    // Verify the Ed25519 signature before trusting any response content.
+    let sig = renew_resp
+        .signature
+        .ok_or_else(|| anyhow!("Server response missing signature"))?;
+    let resp_payload_bytes = renew_resp
+        .payload_bytes
+        .ok_or_else(|| anyhow!("Server response missing payload_bytes"))?;
+    let identity_pub_pem = fs::read_to_string(identity_pub)
+        .with_context(|| format!("Failed to read identity public key from {}", identity_pub))?;
+    let identity_pub_bytes = pem::parse(identity_pub_pem)
+        .context("Failed to parse identity.pub PEM")?
+        .into_contents();
+    ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, &identity_pub_bytes)
+        .verify(&resp_payload_bytes, &sig)
+        .map_err(|_| anyhow!("Ed25519 signature verification failed"))?;
+
+    let resp_payload = RenewResponsePayload::decode(resp_payload_bytes.as_slice())
+        .context("Decode RenewResponsePayload")?;
+
+    if resp_payload.client_nonce != client_nonce {
+        bail!("client_nonce mismatch in response -- possible replay attack");
+    }
+
+    println!("Renewal accepted. Pending record: {}", resp_payload.id);
+    for artifact in &resp_payload.artifacts {
+        println!("  {} ({} bytes)", artifact.filename, artifact.content.len());
+    }
+
+    if let Some(dir) = staging_dir {
+        fs::create_dir_all(dir)
+            .with_context(|| format!("Failed to create staging dir {:?}", dir))?;
+        for artifact in &resp_payload.artifacts {
+            let dest = dir.join(&artifact.filename);
+            fs::write(&dest, &artifact.content)
+                .with_context(|| format!("Failed to write artifact {:?}", dest))?;
+        }
+        println!("Artifacts written to {:?}", dir);
+    }
+
+    println!("Relaunch the VM with the updated artifacts to promote the pending record.");
     Ok(())
 }
 
