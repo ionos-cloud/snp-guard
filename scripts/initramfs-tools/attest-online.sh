@@ -38,6 +38,12 @@ panic() {
     exec sh
 }
 
+echo
+echo "================================================================"
+echo "  snpguard: ONLINE attestation starting"
+echo "================================================================"
+echo
+
 # ---------------------------------------------------------------------------
 # Step 1 - Configure networking
 # ---------------------------------------------------------------------------
@@ -117,6 +123,12 @@ echo -n "$VMK" | cryptsetup luksOpen "$REAL_ROOT" root_crypt --key-file=- \
 unset VMK
 
 echo "snpguard attest: successfully attested"
+
+echo
+echo "================================================================"
+echo "  snpguard: ONLINE attestation done"
+echo "================================================================"
+echo
 
 # Ensure the ROOT variable is overridden
 echo "ROOT=/dev/mapper/root_crypt" >> /conf/param.conf

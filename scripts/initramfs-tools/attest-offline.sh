@@ -62,6 +62,12 @@ panic() {
     exec sh
 }
 
+echo
+echo "================================================================"
+echo "  snpguard: OFFLINE attestation starting"
+echo "================================================================"
+echo
+
 # Determine root device
 if [ -z "$ROOT" ]; then
     ROOT="$(sed -n 's/.*\broot=\([^ ]*\).*/\1/p' /proc/cmdline)"
@@ -101,6 +107,11 @@ if [ -n "$DERIVE_KEY" ]; then
             cryptsetup luksOpen --key-slot 1 "$REAL_ROOT" root_crypt --key-file=- 2>/dev/null; then
         echo "snpguard attest: offline attestation successful"
         unset DERIVE_KEY
+        echo
+        echo "================================================================"
+        echo "  snpguard: OFFLINE attestation done"
+        echo "================================================================"
+        echo
         echo "ROOT=/dev/mapper/root_crypt" >> /conf/param.conf
         exit 0
     fi
@@ -193,6 +204,12 @@ if [ -n "$DERIVE_KEY" ]; then
 fi
 
 unset VMK
+
+echo
+echo "================================================================"
+echo "  snpguard: OFFLINE attestation done"
+echo "================================================================"
+echo
 
 # Ensure the ROOT variable is overridden
 echo "ROOT=/dev/mapper/root_crypt" >> /conf/param.conf
