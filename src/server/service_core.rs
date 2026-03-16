@@ -60,34 +60,147 @@ fn fmt_ts(ts: chrono::NaiveDateTime) -> String {
     ts.format("%Y-%m-%d %H:%M UTC").to_string()
 }
 
-struct ParsedReport<'a> {
-    report: AttestationReport,
-    raw: &'a [u8],
-}
-
-fn parse_snp_report(report_data: &[u8]) -> Result<ParsedReport<'_>, String> {
+fn parse_snp_report(report_data: &[u8]) -> Result<AttestationReport, String> {
     AttestationReport::from_bytes(report_data)
-        .map(|r| ParsedReport {
-            report: r,
-            raw: report_data,
-        })
         .map_err(|e| format!("Failed to parse attestation report: {e}"))
 }
 
-fn verify_binding_hash(
-    server_nonce: &[u8],
-    client_pub_bytes: &[u8],
-    report_data: &[u8; 64],
-) -> Result<(), String> {
-    // Compute expected binding hash: SHA512(server_nonce || client_pub_bytes)
-    let mut hasher = Sha512::new();
-    hasher.update(server_nonce);
-    hasher.update(client_pub_bytes);
-    let expected_digest: [u8; 64] = hasher.finalize().into();
+/// Verify the binding hash embedded in the SNP report.
+///
+/// The report commits to SHA512(hash_input).  For the attestation flow
+/// hash_input = server_nonce || client_pub_bytes; for the renewal flow it is
+/// payload_bytes (which already contains server_nonce inside it).
+fn verify_binding_hash(hash_input: &[u8], report_data: &[u8; 64]) -> Result<(), String> {
+    let expected: [u8; 64] = Sha512::digest(hash_input).into();
 
-    // Verify report_data matches expected binding hash
-    if report_data != &expected_digest {
+    if report_data != &expected {
         return Err("Security Alert: REPORT_DATA binding mismatch!".to_string());
+    }
+
+    Ok(())
+}
+
+/// Cheap, synchronous part of report verification: parse, nonce, binding
+/// hash, and VMPL.  Intentionally excludes signature verification, which
+/// requires a network round-trip to AMD KDS and must run last (see
+/// `verify_report_signature`).
+fn verify_snp_report(
+    report_data: &[u8],
+    server_nonce: &[u8],
+    hash_input: &[u8],
+    nonce_secret: &[u8; 32],
+) -> Result<AttestationReport, String> {
+    let report = parse_snp_report(report_data)?;
+
+    crate::nonce::verify_nonce(nonce_secret, server_nonce)
+        .map_err(|e| format!("Invalid or expired nonce: {:?}", e))?;
+
+    verify_binding_hash(hash_input, &report.report_data)?;
+
+    if report.vmpl > 0 {
+        return Err(format!(
+            "Security Alert: Report generated from VMPL {} (expected 0)",
+            report.vmpl
+        ));
+    }
+
+    Ok(report)
+}
+
+/// Expensive last step: fetch AMD certificates over the network and verify the
+/// report signature.  Must be called after all cheap checks and DB lookups
+/// pass, to avoid unnecessary network traffic for invalid requests.
+fn verify_report_signature(report_data: &[u8]) -> Result<(), String> {
+    let temp_dir = tempfile::TempDir::new().map_err(|_| "Failed to create temp dir".to_string())?;
+    let report_path = temp_dir.path().join("report.bin");
+    std::fs::write(&report_path, report_data)
+        .map_err(|_| "Failed to write report to temp file".to_string())?;
+    snpguest_wrapper::verify_report_signature(&report_path)
+        .map_err(|e| format!("Signature verification failed: {}", e))
+}
+
+/// Common verification path shared by the attest and renew flows.
+///
+/// Order is chosen for efficiency: cheap checks first, expensive AMD
+/// certificate fetch last.
+///
+///   1. Validate `server_nonce` (64 bytes).
+///   2. Parse report; verify nonce, binding hash, and VMPL.
+///   3. Look up the VM record by `image_id + id_key_digest + auth_key_digest`.
+///   4. Verify the record is enabled and meets TCB minimums.
+///   5. Verify the AMD report signature (network call -- last).
+///
+/// `hash_input`: the bytes passed to SHA512 to produce report_data.
+/// For the attest flow this is `server_nonce || client_pub_bytes`; for the
+/// renew flow it is `payload_bytes` (which already contains server_nonce).
+async fn verify_request_common(
+    report_data: &[u8],
+    server_nonce: &[u8],
+    hash_input: &[u8],
+    nonce_secret: &[u8; 32],
+    db: &DatabaseConnection,
+) -> Result<(AttestationReport, vm::Model), String> {
+    if server_nonce.len() != 64 {
+        return Err(format!(
+            "Invalid server_nonce length: {}",
+            server_nonce.len()
+        ));
+    }
+
+    let report = verify_snp_report(report_data, server_nonce, hash_input, nonce_secret)?;
+
+    let vm = vm::Entity::find()
+        .filter(vm::Column::ImageId.eq(report.image_id.to_vec()))
+        .filter(vm::Column::IdKeyDigest.eq(report.id_key_digest.to_vec()))
+        .filter(vm::Column::AuthKeyDigest.eq(report.author_key_digest.to_vec()))
+        .one(db)
+        .await
+        .map_err(|_| "Database error".to_string())?
+        .ok_or_else(|| "No matching attestation record found".to_string())?;
+
+    verify_vm_policy(&vm, &report)?;
+
+    verify_report_signature(report_data)?;
+
+    Ok((report, vm))
+}
+
+/// Verify VM record policy against a verified attestation report.
+///
+/// Checks that are identical across every flow once the DB record is in hand:
+///   1. Record is enabled.
+///   2. All four TCB component versions meet the stored minimums.
+///
+/// `verify_snp_report` must be called before this function.
+fn verify_vm_policy(vm: &vm::Model, report: &AttestationReport) -> Result<(), String> {
+    if !vm.enabled {
+        return Err("Attestation record is disabled".to_string());
+    }
+
+    let tcb = &report.current_tcb;
+    if tcb.bootloader < vm.min_tcb_bootloader as u8 {
+        return Err(format!(
+            "Bootloader TCB version {} below minimum requirement {}",
+            tcb.bootloader, vm.min_tcb_bootloader
+        ));
+    }
+    if tcb.tee < vm.min_tcb_tee as u8 {
+        return Err(format!(
+            "TEE TCB version {} below minimum requirement {}",
+            tcb.tee, vm.min_tcb_tee
+        ));
+    }
+    if tcb.snp < vm.min_tcb_snp as u8 {
+        return Err(format!(
+            "SNP TCB version {} below minimum requirement {}",
+            tcb.snp, vm.min_tcb_snp
+        ));
+    }
+    if tcb.microcode < vm.min_tcb_microcode as u8 {
+        return Err(format!(
+            "Microcode TCB version {} below minimum requirement {}",
+            tcb.microcode, vm.min_tcb_microcode
+        ));
     }
 
     Ok(())
@@ -192,211 +305,46 @@ pub async fn verify_report_core(
     state: Arc<ServiceState>,
     req: AttestationRequest,
 ) -> AttestationResponse {
-    // Validate required fields
-    if req.server_nonce.len() != 64 {
-        return AttestationResponse {
-            success: false,
-            encapped_key: vec![],
-            ciphertext: vec![],
-            error_message: format!("Invalid server_nonce length: {}", req.server_nonce.len()),
+    macro_rules! fail {
+        ($msg:expr) => {
+            return AttestationResponse {
+                success: false,
+                encapped_key: vec![],
+                ciphertext: vec![],
+                error_message: $msg,
+            }
         };
     }
-    if req.client_pub_bytes.len() != 32 {
-        return AttestationResponse {
-            success: false,
-            encapped_key: vec![],
-            ciphertext: vec![],
-            error_message: format!(
-                "Invalid client_pub_bytes length: {}",
-                req.client_pub_bytes.len()
-            ),
-        };
-    }
+
+    // Flow-specific prerequisite: sealed_blob must be present
     if req.sealed_blob.is_empty() {
-        return AttestationResponse {
-            success: false,
-            encapped_key: vec![],
-            ciphertext: vec![],
-            error_message: "sealed_blob is required".to_string(),
-        };
+        fail!("sealed_blob is required".to_string());
     }
 
-    // Parse report with sev call from bytes
-    let parsed = match parse_snp_report(&req.report_data) {
-        Ok(p) => p,
-        Err(e) => {
-            return AttestationResponse {
-                success: false,
-                encapped_key: vec![],
-                ciphertext: vec![],
-                error_message: e,
-            }
-        }
-    };
-
-    // Verify stateless nonce from the report.report_data. The nonce is
-    // verified from req.server_nonce, and the binding hash ensures it
-    // matches what's embedded in report.report_data
-    if let Err(e) = crate::nonce::verify_nonce(&state.attestation_state.secret, &req.server_nonce) {
-        return AttestationResponse {
-            success: false,
-            encapped_key: vec![],
-            ciphertext: vec![],
-            error_message: format!("Invalid or expired nonce: {:?}", e),
-        };
+    if req.client_pub_bytes.len() != 32 {
+        fail!(format!(
+            "Invalid client_pub_bytes length: {}",
+            req.client_pub_bytes.len()
+        ));
     }
 
-    // Verify hash binding
-    if let Err(e) = verify_binding_hash(
+    // Attest flow: report_data = SHA512(server_nonce || client_pub_bytes)
+    let hash_input = [req.server_nonce.as_slice(), req.client_pub_bytes.as_slice()].concat();
+
+    // Common path: field validation, report verification, DB lookup, policy,
+    // and AMD signature check (last)
+    let (_, vm) = match verify_request_common(
+        &req.report_data,
         &req.server_nonce,
-        &req.client_pub_bytes,
-        &parsed.report.report_data,
-    ) {
-        return AttestationResponse {
-            success: false,
-            encapped_key: vec![],
-            ciphertext: vec![],
-            error_message: e,
-        };
-    }
-
-    // Find attestation record by report.image_id,
-    // report.id_key_digest, report.auth_key_digest
-    let record = match vm::Entity::find()
-        .filter(vm::Column::ImageId.eq(parsed.report.image_id.to_vec()))
-        .filter(vm::Column::IdKeyDigest.eq(parsed.report.id_key_digest.to_vec()))
-        .filter(vm::Column::AuthKeyDigest.eq(parsed.report.author_key_digest.to_vec()))
-        .one(&state.db)
-        .await
+        &hash_input,
+        &state.attestation_state.secret,
+        &state.db,
+    )
+    .await
     {
-        Ok(r) => r,
-        Err(_) => {
-            return AttestationResponse {
-                success: false,
-                encapped_key: vec![],
-                ciphertext: vec![],
-                error_message: "Database error".to_string(),
-            }
-        }
+        Ok(result) => result,
+        Err(e) => fail!(e),
     };
-
-    let vm = match record.ok_or("No matching attestation record found") {
-        Ok(vm) => vm,
-        Err(e) => {
-            return AttestationResponse {
-                success: false,
-                encapped_key: vec![],
-                ciphertext: vec![],
-                error_message: e.to_string(),
-            }
-        }
-    };
-
-    // Check if record is not disabled
-    if !vm.enabled {
-        return AttestationResponse {
-            success: false,
-            encapped_key: vec![],
-            ciphertext: vec![],
-            error_message: "Attestation record is disabled".to_string(),
-        };
-    }
-
-    // Check TCB
-    let current_bootloader = parsed.report.current_tcb.bootloader;
-    let current_tee = parsed.report.current_tcb.tee;
-    let current_snp = parsed.report.current_tcb.snp;
-    let current_microcode = parsed.report.current_tcb.microcode;
-
-    if current_bootloader < vm.min_tcb_bootloader as u8 {
-        return AttestationResponse {
-            success: false,
-            encapped_key: vec![],
-            ciphertext: vec![],
-            error_message: format!(
-                "Bootloader TCB version {} below minimum requirement {}",
-                current_bootloader, vm.min_tcb_bootloader
-            ),
-        };
-    }
-    if current_tee < vm.min_tcb_tee as u8 {
-        return AttestationResponse {
-            success: false,
-            encapped_key: vec![],
-            ciphertext: vec![],
-            error_message: format!(
-                "TEE TCB version {} below minimum requirement {}",
-                current_tee, vm.min_tcb_tee
-            ),
-        };
-    }
-    if current_snp < vm.min_tcb_snp as u8 {
-        return AttestationResponse {
-            success: false,
-            encapped_key: vec![],
-            ciphertext: vec![],
-            error_message: format!(
-                "SNP TCB version {} below minimum requirement {}",
-                current_snp, vm.min_tcb_snp
-            ),
-        };
-    }
-    if current_microcode < vm.min_tcb_microcode as u8 {
-        return AttestationResponse {
-            success: false,
-            encapped_key: vec![],
-            ciphertext: vec![],
-            error_message: format!(
-                "Microcode TCB version {} below minimum requirement {}",
-                current_microcode, vm.min_tcb_microcode
-            ),
-        };
-    }
-
-    // Check VMPL
-    if parsed.report.vmpl > 0 {
-        return AttestationResponse {
-            success: false,
-            encapped_key: vec![],
-            ciphertext: vec![],
-            error_message: format!(
-                "Security Alert: Report generated from VMPL {} (expected 0)",
-                parsed.report.vmpl
-            ),
-        };
-    }
-
-    // Verify report certs (verify report signature)
-    let temp_dir = match tempfile::TempDir::new() {
-        Ok(dir) => dir,
-        Err(_) => {
-            return AttestationResponse {
-                success: false,
-                encapped_key: vec![],
-                ciphertext: vec![],
-                error_message: "Failed to create temp dir".to_string(),
-            };
-        }
-    };
-
-    let report_path = temp_dir.path().join("report.bin");
-    if std::fs::write(&report_path, parsed.raw).is_err() {
-        return AttestationResponse {
-            success: false,
-            encapped_key: vec![],
-            ciphertext: vec![],
-            error_message: "Failed to write report to temp file".to_string(),
-        };
-    }
-
-    if let Err(e) = snpguest_wrapper::verify_report_signature(&report_path) {
-        return AttestationResponse {
-            success: false,
-            encapped_key: vec![],
-            ciphertext: vec![],
-            error_message: format!("Signature verification failed: {}", e),
-        };
-    }
 
     // Decrypt unsealing private key from DB using ingestion key
     let unsealing_priv_bytes = match state
@@ -404,14 +352,7 @@ pub async fn verify_report_core(
         .decrypt(&vm.unsealing_private_key_encrypted)
     {
         Ok(decrypted) => decrypted,
-        Err(e) => {
-            return AttestationResponse {
-                success: false,
-                encapped_key: vec![],
-                ciphertext: vec![],
-                error_message: format!("Failed to decrypt unsealing key: {}", e),
-            };
-        }
+        Err(e) => fail!(format!("Failed to decrypt unsealing key: {}", e)),
     };
 
     let (encapped_key, ciphertext) = match reencrypt_sealed_blob(
@@ -420,14 +361,7 @@ pub async fn verify_report_core(
         &req.client_pub_bytes,
     ) {
         Ok(result) => result,
-        Err(e) => {
-            return AttestationResponse {
-                success: false,
-                encapped_key: vec![],
-                ciphertext: vec![],
-                error_message: e,
-            };
-        }
+        Err(e) => fail!(e),
     };
 
     // Update request count
@@ -435,7 +369,6 @@ pub async fn verify_report_core(
     active.request_count = Set(vm.request_count + 1);
     let _ = active.update(&state.db).await;
 
-    // Success
     AttestationResponse {
         success: true,
         encapped_key,
