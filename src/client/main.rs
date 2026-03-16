@@ -232,6 +232,11 @@ fn ingestion_key_dest_path() -> Result<PathBuf> {
     Ok(base.join("snpguard").join("ingestion.pub"))
 }
 
+fn identity_key_dest_path() -> Result<PathBuf> {
+    let base = config_dir().ok_or_else(|| anyhow!("Cannot determine config dir"))?;
+    Ok(base.join("snpguard").join("identity.pub"))
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 struct StoredConfig {
     token: Option<String>,
@@ -283,6 +288,10 @@ fn delete_config() -> Result<()> {
     let ingestion_key_path = ingestion_key_dest_path()?;
     if ingestion_key_path.exists() {
         fs::remove_file(ingestion_key_path)?;
+    }
+    let identity_key_path = identity_key_dest_path()?;
+    if identity_key_path.exists() {
+        fs::remove_file(identity_key_path)?;
     }
     Ok(())
 }
@@ -799,6 +808,7 @@ async fn run_config(action: ConfigCmd) -> Result<()> {
             let base = normalize_https(&url)?;
             let ca_dest = ca_dest_path()?;
             let ingestion_key_dest = ingestion_key_dest_path()?;
+            let identity_key_dest = identity_key_dest_path()?;
 
             // Request public info (without TLS verification - TOFU)
             println!("Requesting server public information...");
@@ -833,6 +843,10 @@ async fn run_config(action: ConfigCmd) -> Result<()> {
                 .get("ingestion_pub_key")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow!("Server response missing 'ingestion_pub_key' field"))?;
+            let identity_pub_key = public_info
+                .get("identity_pub_key")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow!("Server response missing 'identity_pub_key' field"))?;
 
             // Hash the CA cert and show to user
             let mut hasher = Sha256::new();
@@ -891,6 +905,14 @@ async fn run_config(action: ConfigCmd) -> Result<()> {
             {
                 use std::os::unix::fs::PermissionsExt;
                 fs::set_permissions(&ingestion_key_dest, fs::Permissions::from_mode(0o600))?;
+            }
+
+            // Save identity public key (Ed25519; to be baked into guest initrd)
+            fs::write(&identity_key_dest, identity_pub_key.as_bytes())?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&identity_key_dest, fs::Permissions::from_mode(0o600))?;
             }
 
             // Save config
