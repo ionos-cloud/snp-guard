@@ -260,6 +260,11 @@ Currently, there is no rate limiting implemented. Consider adding rate limiting 
 
 6. **Server Identity Key**: The server generates a stable Ed25519 signing keypair on first start and persists it at `/data/auth/identity.key` (private, PKCS#8 DER in PEM, mode 0400) and `/data/auth/identity.pub` (public, raw 32 bytes in PEM). The private key is used to sign artifacts sent to guests in RenewResponse messages. The public key is exposed via `GET /v1/public/info` and is meant to be baked into the guest initrd during image conversion, so the guest can verify artifact authenticity without trusting the network. Back up `identity.key` alongside `ingestion.key` - regenerating it would invalidate all previously prepared guest images.
 
-5. **TOFU (Trust On First Use)**: Client configuration uses TOFU for secure server identity verification. During `config login`, the client fetches the server's public identity (CA cert and ingestion public key) from `/v1/public/info`, displays the CA certificate hash for user verification, and only proceeds after user confirmation. This eliminates the need to manually provide CA certificates.
+5. **TOFU (Trust On First Use)**: Client configuration uses TOFU for secure server identity
+   verification. During `config login`, the client fetches all three public values from
+   `/v1/public/info` (CA cert, ingestion public key, identity public key), displays the CA
+   certificate hash for user verification, and only proceeds after user confirmation. All three
+   values are written to `~/.config/snpguard/` (ca.pem, ingestion.pub, identity.pub) and removed
+   on `config logout`. This eliminates the need to manually provide CA certificates or public keys.
 
 5. **Key Format**: All X25519 keys (unsealing and ingestion) use a non-standard PEM format (raw 32-byte keys wrapped in PEM). This is NOT standard PKCS#8 format. Standard tools like `openssl` may not recognize this format, but it works correctly with SnpGuard.
