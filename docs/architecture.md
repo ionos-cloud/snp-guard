@@ -97,6 +97,7 @@ SnpGuard is a SEV-SNP attestation service that verifies the integrity of guest V
 5. **Record Lookup**: Finds matching attestation records by image_id and key digests
 6. **VMK Decryption**: Decrypts sealed VMK blob using unsealing private key (stored encrypted in DB)
 7. **Session Encryption**: Encrypts VMK with ephemeral session key using client's public key (HPKE)
+8. **Artifact Signing**: Signs artifacts delivered to guests using the server's Ed25519 identity key
 
 ### Attestation Client
 
@@ -318,6 +319,16 @@ CREATE TABLE attestation_records (
 ```
 
 **Key Management Notes**:
+
+- **Server Identity Key** (`/data/auth/identity.key` / `identity.pub`): A stable Ed25519 signing
+  keypair generated on first server start. The private key signs artifacts sent to guests
+  (RenewResponse). The public key is returned by `GET /v1/public/info` under `identity_pub_key` and
+  is baked into the guest initrd at image conversion time, enabling the guest to verify artifact
+  authenticity offline without trusting the network. Must be backed up alongside the ingestion key.
+
+- **Ingestion Key** (`/data/auth/ingestion.key` / `ingestion.pub`): X25519 HPKE keypair used to
+  encrypt the unsealing private key before it is uploaded to the server. Also backs the
+  `ingestion_pub_key` field of `GET /v1/public/info`.
 
 - **ID and Auth Keys**: Randomly generated secp384r1 EC private keys created once when an attestation record is created. They are encrypted with the ingestion public key (HPKE) and stored in the database (`id_key_encrypted`, `auth_key_encrypted`). The plaintext keys are securely deleted after encryption. Key digests are computed from the plaintext keys before encryption and stored for lookup purposes.
 

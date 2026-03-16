@@ -103,8 +103,9 @@ Management Web UI.
 make run-server
 ```
 
-On first start, the server generates a master password and prints it
-to stdout. Copy it, then:
+On first start, the server generates a master password, an HPKE
+ingestion keypair, and an Ed25519 identity keypair, printing the
+master password to stdout. Copy it, then:
 
 * Navigate to the Web Dashboard at https://${HOSTNAME_OR_IP}:3000
 * Log in with the master password

@@ -28,7 +28,9 @@ Content-Type: application/x-protobuf
 
 #### GET `/v1/public/info`
 
-Get the server's public identity (CA certificate and ingestion public key) for TOFU (Trust On First Use) authentication.
+Get the server's public identity for TOFU (Trust On First Use) authentication and image conversion.
+Returns the TLS CA certificate, the HPKE ingestion public key used to encrypt the unsealing private
+key, and the Ed25519 identity public key used to sign artifacts delivered to guests.
 
 **Request**: No body required
 
@@ -38,11 +40,20 @@ Get the server's public identity (CA certificate and ingestion public key) for T
   ```json
   {
     "ca_cert": "-----BEGIN CERTIFICATE-----\n...",
-    "ingestion_pub_key": "-----BEGIN PUBLIC KEY-----\n..."
+    "ingestion_pub_key": "-----BEGIN PUBLIC KEY-----\n...",
+    "identity_pub_key": "-----BEGIN PUBLIC KEY-----\n..."
   }
   ```
+  - `ca_cert`: TLS CA certificate (PEM). Used by clients to verify the server's TLS certificate.
+  - `ingestion_pub_key`: X25519 HPKE public key (raw 32 bytes, non-standard PEM). Used to encrypt
+    the unsealing private key before uploading it to the server during image registration.
+  - `identity_pub_key`: Ed25519 public key (raw 32 bytes, non-standard PEM). Stable server signing
+    key; to be baked into the guest initrd so the guest can verify artifacts received from the server
+    without a separate network round-trip.
 
-**Note**: This endpoint is public (no authentication required) and is used for TOFU during client configuration. The CA certificate hash should be verified by the user before proceeding with authentication.
+**Note**: This endpoint is public (no authentication required) and is used for TOFU during client
+configuration. The CA certificate hash should be verified by the user before proceeding with
+authentication.
 
 **Error Responses**:
 - `500 Internal Server Error`: Server error retrieving public information
@@ -246,6 +257,8 @@ Currently, there is no rate limiting implemented. Consider adding rate limiting 
 3. **Input Validation**: All file uploads are validated for size limits. File paths are sanitized to prevent directory traversal.
 
 4. **Key Encryption**: ID-Block keys, Auth-Block keys, and unsealing private keys are all encrypted with HPKE (Hybrid Public Key Encryption) using X25519HkdfSha256, HkdfSha256, and AesGcm256 before storage. The ingestion private key (`/data/auth/ingestion.key`) must be backed up securely - if lost, encrypted keys cannot be recovered. The ingestion public key is available via `GET /v1/public/info` for TOFU and client-side encryption. ID and Auth key files are deleted from the artifacts folder after encryption and storage in the database.
+
+6. **Server Identity Key**: The server generates a stable Ed25519 signing keypair on first start and persists it at `/data/auth/identity.key` (private, PKCS#8 DER in PEM, mode 0400) and `/data/auth/identity.pub` (public, raw 32 bytes in PEM). The private key is used to sign artifacts sent to guests in RenewResponse messages. The public key is exposed via `GET /v1/public/info` and is meant to be baked into the guest initrd during image conversion, so the guest can verify artifact authenticity without trusting the network. Back up `identity.key` alongside `ingestion.key` - regenerating it would invalidate all previously prepared guest images.
 
 5. **TOFU (Trust On First Use)**: Client configuration uses TOFU for secure server identity verification. During `config login`, the client fetches the server's public identity (CA cert and ingestion public key) from `/v1/public/info`, displays the CA certificate hash for user verification, and only proceeds after user confirmation. This eliminates the need to manually provide CA certificates.
 

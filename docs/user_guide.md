@@ -60,7 +60,10 @@ cargo run --bin snpguard-client config login \
   --token ${TOKEN}
 ```
 
-This implements TOFU (Trust On First Use) - fetches server's public identity (CA cert and ingestion public key) from `/v1/public/info`, displays CA cert hash for user verification, validates token via `/v1/health` with the received CA cert, then stores URL/token, CA cert, and ingestion public key to `~/.config/snpguard/`.
+This implements TOFU (Trust On First Use) - fetches server's public identity (CA cert, ingestion
+public key, and identity public key) from `/v1/public/info`, displays CA cert hash for user
+verification, validates token via `/v1/health` with the received CA cert, then stores URL/token, CA
+cert, ingestion public key, and identity public key to `~/.config/snpguard/`.
 
 ### 4. Image Conversion (Prepare Guest VM)
 
@@ -371,12 +374,12 @@ This permanently removes the record and all associated artifacts.
 ### Configuration Commands
 
 - `config login --url <URL> --token <TOKEN>`: Store management token (TOFU - Trust On First Use)
-  - Fetches server's public identity (CA cert and ingestion public key) from `/v1/public/info`
+  - Fetches server's public identity (CA cert, ingestion public key, identity public key) from `/v1/public/info`
   - Displays CA cert hash for user verification
   - Validates token via `/v1/health` with the received CA cert
-  - Stores URL/token, CA cert, and ingestion public key to `~/.config/snpguard/`
+  - Stores URL/token, CA cert, ingestion public key, and identity public key to `~/.config/snpguard/`
 
-- `config logout`: Remove all stored configuration files (token, URL, CA cert, ingestion public key)
+- `config logout`: Remove all stored configuration files (token, URL, CA cert, ingestion public key, identity public key)
 
 ### Attestation Command
 
