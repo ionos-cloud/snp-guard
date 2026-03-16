@@ -8,6 +8,7 @@ use axum_server::tls_rustls::RustlsConfig;
 use rand::RngCore;
 use rustls::crypto::ring::default_provider as ring_crypto_provider;
 use sea_orm::Database;
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -78,6 +79,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &paths.identity_pub,
     )?);
 
+    print_key_fingerprints(&paths.ca_cert, &ingestion_keys, &identity_key);
+
     // 4. Service core state (shared)
     let data_paths = Arc::new(paths);
     let service_state = Arc::new(service_core::ServiceState {
@@ -132,6 +135,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     Ok(())
+}
+
+fn print_key_fingerprints(
+    ca_cert_path: &PathBuf,
+    ingestion_keys: &ingestion_key::IngestionKeys,
+    identity_key: &identity_key::IdentityKey,
+) {
+    // CA cert: SHA256 of PEM bytes (matches `openssl x509 -fingerprint` convention)
+    let ca_fp = match fs::read(ca_cert_path) {
+        Ok(pem_bytes) => hex::encode(Sha256::digest(&pem_bytes)),
+        Err(e) => format!("<error reading CA cert: {}>", e),
+    };
+
+    // Public keys: SHA256 of raw 32-byte key material
+    let ingestion_fp = hex::encode(Sha256::digest(ingestion_keys.get_public_key_bytes()));
+    let identity_fp = hex::encode(Sha256::digest(identity_key.get_public_key_bytes()));
+
+    println!("==================================================");
+    println!("Server key fingerprints (SHA256):");
+    println!("  CA Certificate : {}", ca_fp);
+    println!("  Ingestion Key  : {}", ingestion_fp);
+    println!("  Identity Key   : {}", identity_fp);
+    println!("==================================================");
 }
 
 fn generate_self_signed_cert(
