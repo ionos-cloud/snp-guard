@@ -9,8 +9,8 @@ use crate::config::DataPaths;
 use crate::identity_key::IdentityKey;
 use crate::ingestion_key::IngestionKeys;
 use common::snpguard::{
-    AttestationRecord, AttestationRequest, AttestationResponse, CreateRecordRequest,
-    ToggleEnabledRequest,
+    ArtifactEntry, AttestationRecord, AttestationRequest, AttestationResponse, CreateRecordRequest,
+    RenewRequest, RenewRequestPayload, RenewResponse, RenewResponsePayload, ToggleEnabledRequest,
 };
 use entity::{token, vm, vm_registration};
 use hpke::{
@@ -31,6 +31,7 @@ use argon2::{
     Argon2,
 };
 use base64::Engine;
+use prost::Message;
 use rand::RngCore;
 use uuid::Uuid;
 
@@ -524,6 +525,102 @@ pub async fn create_record_core(
     )
     .await?;
     Ok(res)
+}
+
+pub async fn renew_record_core(state: Arc<ServiceState>, req: RenewRequest) -> RenewResponse {
+    macro_rules! fail {
+        ($msg:expr) => {
+            return RenewResponse {
+                success: false,
+                error_message: Some($msg.to_string()),
+                signature: None,
+                payload_bytes: None,
+            }
+        };
+    }
+
+    let payload = match RenewRequestPayload::decode(req.payload_bytes.as_slice()) {
+        Ok(p) => p,
+        Err(_) => fail!("Failed to decode RenewRequestPayload"),
+    };
+
+    if payload.server_nonce.len() != 64 {
+        fail!(format!(
+            "Invalid server_nonce length: {}",
+            payload.server_nonce.len()
+        ));
+    }
+    if payload.client_nonce.len() != 64 {
+        fail!(format!(
+            "Invalid client_nonce length: {}",
+            payload.client_nonce.len()
+        ));
+    }
+
+    // Renewal flow: report_data = SHA512(payload_bytes); server_nonce is inside payload_bytes
+    let (_, registration, current_record) = match verify_request_common(
+        &req.report_data,
+        &payload.server_nonce,
+        &req.payload_bytes,
+        &state.attestation_state.secret,
+        &state.db,
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(e) => fail!(e),
+    };
+
+    let renew_req = business_logic::RenewRecordRequest {
+        firmware_data: payload.firmware,
+        kernel_data: payload.kernel,
+        initrd_data: payload.initrd,
+        kernel_params: payload.kernel_params,
+    };
+
+    let pending_id = match business_logic::renew_record_logic(
+        &state.db,
+        &state.data_paths,
+        state.ingestion_keys.clone(),
+        registration,
+        current_record,
+        renew_req,
+    )
+    .await
+    {
+        Ok(id) => id,
+        Err(e) => fail!(e),
+    };
+
+    let artifact_dir = state.data_paths.attestations_dir.join(&pending_id);
+    let mut artifacts = Vec::new();
+    for filename in business_logic::RENEW_RESPONSE_ARTIFACTS {
+        match std::fs::read(artifact_dir.join(filename)) {
+            Ok(content) => artifacts.push(ArtifactEntry {
+                filename: filename.to_string(),
+                content,
+            }),
+            Err(e) => fail!(format!("Failed to read artifact {}: {}", filename, e)),
+        }
+    }
+
+    let resp_payload = RenewResponsePayload {
+        id: pending_id,
+        client_nonce: payload.client_nonce,
+        artifacts,
+    };
+    let mut resp_payload_bytes = Vec::new();
+    resp_payload
+        .encode(&mut resp_payload_bytes)
+        .expect("RenewResponsePayload encode");
+    let signature = state.identity_key.sign(&resp_payload_bytes);
+
+    RenewResponse {
+        success: true,
+        error_message: None,
+        signature: Some(signature),
+        payload_bytes: Some(resp_payload_bytes),
+    }
 }
 
 pub async fn delete_record_core(state: &Arc<ServiceState>, id: String) -> Result<(), String> {

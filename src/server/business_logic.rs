@@ -3,7 +3,7 @@ use entity::{vm, vm_registration};
 use openssl::ec::{EcGroup, EcKey};
 use openssl::nid::Nid;
 use rand::{rngs::OsRng, RngCore};
-use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set};
+use sea_orm::{ActiveModelTrait, DatabaseConnection, EntityTrait, Set, TransactionTrait};
 use serde_json::json;
 use sev::firmware::guest::GuestPolicy;
 use std::fs;
@@ -40,6 +40,34 @@ impl Drop for ArtifactDirGuard {
                     self.path, e
                 );
             }
+        }
+    }
+}
+
+/// Remove an artifact directory, logging a warning on failure.
+///
+/// The removal is skipped silently if `artifact_dir` does not resolve to a
+/// path inside `base_dir` (path-traversal safety check).
+fn remove_artifact_dir(base_dir: &Path, artifact_dir: &Path) {
+    if !artifact_dir.exists() {
+        return;
+    }
+    let safe = base_dir
+        .canonicalize()
+        .ok()
+        .and_then(|base| {
+            artifact_dir
+                .canonicalize()
+                .ok()
+                .map(|p| p.starts_with(&base))
+        })
+        .unwrap_or(false);
+    if safe {
+        if let Err(e) = fs::remove_dir_all(artifact_dir) {
+            eprintln!(
+                "Warning: failed to remove artifact dir {:?}: {}",
+                artifact_dir, e
+            );
         }
     }
 }
@@ -298,6 +326,260 @@ pub async fn create_record_logic(
         Ok(_) => cleanup_guard.keep(),
         Err(_) => {
             // Explicitly try cleanup (guard's Drop will also try, but this ensures it happens)
+            let _ = fs::remove_dir_all(&artifact_dir);
+        }
+    }
+
+    result
+}
+
+/// Artifact files included in a RenewResponse.
+///
+/// Kernel, initrd, and kernel-params are excluded: the guest supplied them
+/// (or inherited them) and does not need them echoed back.
+pub const RENEW_RESPONSE_ARTIFACTS: &[&str] = &[
+    "firmware-code.fd",
+    "id-block.bin",
+    "id-auth.bin",
+    "launch-config.json",
+];
+
+#[derive(Debug)]
+pub struct RenewRecordRequest {
+    pub firmware_data: Option<Vec<u8>>,
+    pub kernel_data: Option<Vec<u8>>,
+    pub initrd_data: Option<Vec<u8>>,
+    pub kernel_params: Option<String>,
+}
+
+/// Create a pending attestation record for an existing VM registration.
+///
+/// Artifacts absent from the request are copied from the current record's
+/// artifact directory so the pending record is self-contained.  Policy,
+/// vCPU config, and the unsealing key are always inherited from the
+/// current record.  The id/auth keys are the stable per-registration keys
+/// stored on `registration`; they are decrypted, used for measurement, then
+/// securely deleted from the temporary artifact directory.
+/// On success, `vm_registration.pending_record_id` is set to the new record's ID.
+pub async fn renew_record_logic(
+    db: &DatabaseConnection,
+    paths: &DataPaths,
+    ingestion_keys: Arc<ingestion_key::IngestionKeys>,
+    registration: vm_registration::Model,
+    current_record: vm::Model,
+    req: RenewRecordRequest,
+) -> Result<String, String> {
+    let pending_id = Uuid::new_v4().to_string();
+    let artifact_dir = paths.attestations_dir.join(&pending_id);
+    let current_dir = paths.attestations_dir.join(&current_record.id);
+    let mut cleanup_guard = ArtifactDirGuard::new(artifact_dir.clone());
+    let image_id = Uuid::new_v4();
+    // Capture any existing pending record so we can replace it atomically.
+    let old_pending_id = registration.pending_record_id.clone();
+
+    let result = async {
+        fs::create_dir_all(&artifact_dir)
+            .map_err(|e| format!("Failed to create artifact directory: {}", e))?;
+
+        // Decrypt the stable id/auth keys from the registration so they can
+        // be passed to snpguest for measurement.  The encrypted copies remain
+        // on the registration unchanged; only the temp files are deleted after use.
+        let id_key_pem = ingestion_keys
+            .decrypt(
+                registration
+                    .id_key_encrypted
+                    .as_deref()
+                    .ok_or_else(|| "Registration has no id_key_encrypted".to_string())?,
+            )
+            .map_err(|e| format!("Failed to decrypt ID key: {}", e))?;
+        let auth_key_pem = ingestion_keys
+            .decrypt(
+                registration
+                    .auth_key_encrypted
+                    .as_deref()
+                    .ok_or_else(|| "Registration has no auth_key_encrypted".to_string())?,
+            )
+            .map_err(|e| format!("Failed to decrypt auth key: {}", e))?;
+
+        fs::write(artifact_dir.join("id-block-key.pem"), &id_key_pem)
+            .map_err(|e| format!("Failed to write ID key: {}", e))?;
+        fs::write(artifact_dir.join("id-auth-key.pem"), &auth_key_pem)
+            .map_err(|e| format!("Failed to write auth key: {}", e))?;
+
+        // Resolve firmware: from request or copy from current record dir
+        let firmware_path: Option<String> = match req.firmware_data {
+            Some(data) => {
+                fs::write(artifact_dir.join("firmware-code.fd"), data)
+                    .map_err(|e| format!("Failed to save firmware: {}", e))?;
+                Some("firmware-code.fd".into())
+            }
+            None => {
+                if let Some(p) = &current_record.firmware_path {
+                    fs::copy(current_dir.join(p), artifact_dir.join(p))
+                        .map_err(|e| format!("Failed to copy firmware: {}", e))?;
+                    Some(p.clone())
+                } else {
+                    None
+                }
+            }
+        };
+
+        // Resolve kernel
+        let kernel_path: Option<String> = match req.kernel_data {
+            Some(data) => {
+                fs::write(artifact_dir.join("vmlinuz"), data)
+                    .map_err(|e| format!("Failed to save kernel: {}", e))?;
+                Some("vmlinuz".into())
+            }
+            None => {
+                if let Some(p) = &current_record.kernel_path {
+                    fs::copy(current_dir.join(p), artifact_dir.join(p))
+                        .map_err(|e| format!("Failed to copy kernel: {}", e))?;
+                    Some(p.clone())
+                } else {
+                    None
+                }
+            }
+        };
+
+        // Resolve initrd
+        let initrd_path: Option<String> = match req.initrd_data {
+            Some(data) => {
+                fs::write(artifact_dir.join("initrd.img"), data)
+                    .map_err(|e| format!("Failed to save initrd: {}", e))?;
+                Some("initrd.img".into())
+            }
+            None => {
+                if let Some(p) = &current_record.initrd_path {
+                    fs::copy(current_dir.join(p), artifact_dir.join(p))
+                        .map_err(|e| format!("Failed to copy initrd: {}", e))?;
+                    Some(p.clone())
+                } else {
+                    None
+                }
+            }
+        };
+
+        // Resolve kernel params
+        let kernel_params = req
+            .kernel_params
+            .or_else(|| current_record.kernel_params.clone())
+            .unwrap_or_default();
+        fs::write(artifact_dir.join("kernel-params.txt"), &kernel_params)
+            .map_err(|e| format!("Failed to save kernel params: {}", e))?;
+
+        // Rebuild guest policy from inherited config
+        let mut policy: GuestPolicy = Default::default();
+        policy.set_debug_allowed(current_record.allowed_debug);
+        policy.set_migrate_ma_allowed(current_record.allowed_migrate_ma);
+        policy.set_smt_allowed(current_record.allowed_smt);
+
+        let launch_config = json!({
+            "vcpu-model": current_record.vcpu_type,
+            "vcpu-count": current_record.vcpus,
+            "guest-policy": format!("0x{:x}", u64::from(policy)),
+        });
+        let launch_config_bytes = serde_json::to_vec_pretty(&launch_config)
+            .map_err(|e| format!("Failed to serialize launch config: {}", e))?;
+        fs::write(artifact_dir.join("launch-config.json"), launch_config_bytes)
+            .map_err(|e| format!("Failed to save launch config: {}", e))?;
+
+        // Generate measurement and blocks
+        let _ = snpguest_wrapper::generate_measurement_and_block(
+            &artifact_dir.join(firmware_path.as_deref().unwrap_or("firmware-code.fd")),
+            &artifact_dir.join(kernel_path.as_deref().unwrap_or("vmlinuz")),
+            &artifact_dir.join(initrd_path.as_deref().unwrap_or("initrd.img")),
+            &kernel_params,
+            current_record.vcpus as u32,
+            &current_record.vcpu_type,
+            policy.into(),
+            &artifact_dir.join("id-block-key.pem"),
+            &artifact_dir.join("id-auth-key.pem"),
+            &artifact_dir,
+            image_id.as_bytes(),
+        )
+        .map_err(|e| format!("Failed to generate measurement and blocks: {}", e))?;
+
+        // Securely delete the temp key files -- encrypted originals remain on the registration
+        secure_delete_file(&artifact_dir.join("id-block-key.pem"))
+            .map_err(|e| format!("Failed to securely delete ID key: {}", e))?;
+        secure_delete_file(&artifact_dir.join("id-auth-key.pem"))
+            .map_err(|e| format!("Failed to securely delete auth key: {}", e))?;
+
+        let now = chrono::Utc::now().naive_utc();
+
+        let pending_record = vm::ActiveModel {
+            id: Set(pending_id.clone()),
+            registration_id: Set(registration.id.clone()),
+            unsealing_private_key_encrypted: Set(current_record
+                .unsealing_private_key_encrypted
+                .clone()),
+            vcpus: Set(current_record.vcpus),
+            vcpu_type: Set(current_record.vcpu_type.clone()),
+            created_at: Set(now),
+            image_id: Set(image_id.as_bytes().to_vec()),
+            allowed_debug: Set(current_record.allowed_debug),
+            allowed_migrate_ma: Set(current_record.allowed_migrate_ma),
+            allowed_smt: Set(current_record.allowed_smt),
+            min_tcb_bootloader: Set(current_record.min_tcb_bootloader),
+            min_tcb_tee: Set(current_record.min_tcb_tee),
+            min_tcb_snp: Set(current_record.min_tcb_snp),
+            min_tcb_microcode: Set(current_record.min_tcb_microcode),
+            kernel_params: Set(Some(kernel_params)),
+            firmware_path: Set(firmware_path),
+            kernel_path: Set(kernel_path),
+            initrd_path: Set(initrd_path),
+        };
+
+        // Insert the new pending record, replace any previous one, and update
+        // the registration pointer -- all three must succeed or none should.
+        let txn = db
+            .begin()
+            .await
+            .map_err(|e| format!("Failed to begin transaction: {}", e))?;
+
+        pending_record
+            .insert(&txn)
+            .await
+            .map_err(|e| format!("Failed to save pending record: {}", e))?;
+
+        // If there was already a pending record, delete it in the same
+        // transaction so we never leave a dangling reference.
+        if let Some(ref old_id) = old_pending_id {
+            vm::Entity::delete_by_id(old_id.as_str())
+                .exec(&txn)
+                .await
+                .map_err(|e| format!("Failed to delete previous pending record: {}", e))?;
+        }
+
+        // Point the registration at the new pending record
+        let mut active: vm_registration::ActiveModel = registration.into();
+        active.pending_record_id = Set(Some(pending_id.clone()));
+        active
+            .update(&txn)
+            .await
+            .map_err(|e| format!("Failed to update registration: {}", e))?;
+
+        txn.commit()
+            .await
+            .map_err(|e| format!("Failed to commit renewal: {}", e))?;
+
+        Ok(pending_id)
+    }
+    .await;
+
+    match &result {
+        Ok(_) => {
+            cleanup_guard.keep();
+            // Remove the replaced pending artifact directory from disk.
+            if let Some(ref old_id) = old_pending_id {
+                remove_artifact_dir(
+                    &paths.attestations_dir,
+                    &paths.attestations_dir.join(old_id),
+                );
+            }
+        }
+        Err(_) => {
             let _ = fs::remove_dir_all(&artifact_dir);
         }
     }

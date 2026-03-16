@@ -16,8 +16,8 @@ use crate::nonce;
 use crate::service_core::ServiceState;
 use common::snpguard::{
     AttestationRequest, CreateRecordRequest, CreateRecordResponse, DeleteRecordResponse,
-    GetRecordResponse, ListRecordsResponse, NonceRequest, NonceResponse, ToggleEnabledRequest,
-    ToggleEnabledResponse,
+    GetRecordResponse, ListRecordsResponse, NonceRequest, NonceResponse, RenewRequest,
+    ToggleEnabledRequest, ToggleEnabledResponse,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -39,6 +39,7 @@ pub fn router(state: Arc<ServiceState>, master: Arc<MasterAuth>) -> Router {
         .route("/public/info", get(get_public_info))
         .route("/attest/nonce", post(attest_nonce))
         .route("/attest/report", post(attest_report))
+        .route("/attest/renew", post(attest_renew))
         .with_state(state.clone());
 
     let management = Router::new()
@@ -229,6 +230,15 @@ async fn attest_nonce(State(state): State<Arc<ServiceState>>, body: Bytes) -> Re
     proto_response(NonceResponse {
         nonce: nonce_bytes.to_vec(),
     })
+}
+
+async fn attest_renew(State(state): State<Arc<ServiceState>>, body: Bytes) -> Response {
+    let req = match RenewRequest::decode(&body[..]) {
+        Ok(r) => r,
+        Err(_) => return proto_error(StatusCode::BAD_REQUEST, "Failed to decode RenewRequest"),
+    };
+    let resp = crate::service_core::renew_record_core(state, req).await;
+    proto_response(resp)
 }
 
 async fn attest_report(State(state): State<Arc<ServiceState>>, body: Bytes) -> Response {
