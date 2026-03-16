@@ -23,4 +23,5 @@ copy_exec /usr/sbin/ip /usr/sbin
 # Config files
 copy_file config /etc/snpguard/attest.url
 copy_file config /etc/snpguard/ca.pem
+copy_file config /etc/snpguard/identity.pub
 copy_file config /etc/snpguard/vmk.sealed
