@@ -848,20 +848,35 @@ async fn run_config(action: ConfigCmd) -> Result<()> {
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow!("Server response missing 'identity_pub_key' field"))?;
 
-            // Hash the CA cert and show to user
-            let mut hasher = Sha256::new();
-            hasher.update(ca_cert.as_bytes());
-            let ca_hash = hex::encode(hasher.finalize());
+            // Compute fingerprints for all three public values.
+            // CA cert: SHA256 of the PEM bytes (matches `openssl x509 -fingerprint` convention).
+            // Public keys: SHA256 of the raw 32-byte key material extracted from the PEM.
+            let ca_fp = hex::encode(Sha256::digest(ca_cert.as_bytes()));
 
-            println!("\n=== Server Identity Verification (TOFU) ===");
-            println!("CA Certificate SHA256: {}", ca_hash);
-            println!("\nPlease verify this hash matches the server's CA certificate hash.");
-            println!("You can obtain the hash from the server administrator or");
-            println!("by inspecting the server's CA certificate file.\n");
+            let ingestion_fp = {
+                let parsed = pem::parse(ingestion_pub_key)
+                    .map_err(|e| anyhow!("Failed to parse ingestion public key PEM: {}", e))?;
+                hex::encode(Sha256::digest(parsed.contents()))
+            };
+
+            let identity_fp = {
+                let parsed = pem::parse(identity_pub_key)
+                    .map_err(|e| anyhow!("Failed to parse identity public key PEM: {}", e))?;
+                hex::encode(Sha256::digest(parsed.contents()))
+            };
+
+            println!("\n=== Server Identity Verification (SHA256) ===");
+            println!("CA Certificate  : {}", ca_fp);
+            println!("Ingestion Key   : {}", ingestion_fp);
+            println!("Identity Key    : {}", identity_fp);
+            println!();
+            println!("Verify these fingerprints against the server before proceeding.");
+            println!("Obtain them from the server administrator or from the server's");
+            println!("/data/auth/ directory (ingestion.pub, identity.pub) and TLS cert.\n");
 
             // Get user confirmation
-            if !get_user_confirmation("Does this hash match the server's CA certificate?")? {
-                println!("Aborted. Hash verification failed.");
+            if !get_user_confirmation("Do all three fingerprints match the server?")? {
+                println!("Aborted. Fingerprint verification failed.");
                 std::process::exit(1);
             }
 
