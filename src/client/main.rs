@@ -1,4 +1,5 @@
 use anyhow::{anyhow, bail, Context, Result};
+use boot::sev::{check_sev_support_live, kernel_version_from_path};
 use clap::{Parser, Subcommand};
 use common::snpguard::{
     ArtifactEntry, AttestationRequest, AttestationResponse, CreateRecordRequest,
@@ -20,7 +21,7 @@ use reqwest::Certificate;
 use sev::firmware::guest::{DerivedKey, Firmware, GuestFieldSelect};
 use sha2::{Digest, Sha256, Sha512};
 use std::fs;
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -545,13 +546,134 @@ fn is_root() -> bool {
     rustix::process::getuid().is_root()
 }
 
+/// Discover the kernel, initrd, and kernel parameters from grub.cfg on the live filesystem.
+///
+/// Returns `(kernel_bytes, initrd_bytes, params)`. `initrd_bytes` is None if the selected
+/// entry has no initrd line. `params` may be an empty string.
+fn discover_boot_artifacts(
+    grub_cfg: &Path,
+    interactive: bool,
+) -> Result<(Vec<u8>, Option<Vec<u8>>, String)> {
+    let grub_content = fs::read_to_string(grub_cfg)
+        .with_context(|| format!("Failed to read grub.cfg: {:?}", grub_cfg))?;
+    let entries = boot::grub::parse_grub_cfg_from_str(&grub_content, true)
+        .context("Failed to parse grub.cfg")?;
+
+    let boot_dir = Path::new("/boot");
+    let mut supported: Vec<&boot::grub::GrubEntry> = Vec::new();
+
+    println!("Scanning grub.cfg for SEV-SNP capable kernels...");
+    for entry in &entries {
+        match kernel_version_from_path(&entry.kernel) {
+            Ok(version) => match check_sev_support_live(boot_dir, version) {
+                Ok(support) if support.is_supported() => {
+                    println!("  [+] Supported: {}", entry.kernel);
+                    supported.push(entry);
+                }
+                Ok(_) => println!("  [-] No SEV-SNP support: {}", entry.kernel),
+                Err(e) => println!("  [!] Cannot check {}: {}", entry.kernel, e),
+            },
+            Err(e) => println!("  [!] Unrecognised kernel name {}: {}", entry.kernel, e),
+        }
+    }
+
+    if supported.is_empty() {
+        bail!("No SEV-SNP capable kernels found in {:?}", grub_cfg);
+    }
+
+    let selected: &boot::grub::GrubEntry = if supported.len() == 1 {
+        let entry = supported[0];
+        println!("\n  Using single SEV-SNP supported entry:");
+        println!("    Kernel: {}", entry.kernel);
+        println!(
+            "    Initrd: {}",
+            entry.initrd.as_deref().unwrap_or("(none)")
+        );
+        println!("    Params: {}", entry.params);
+        entry
+    } else if !interactive {
+        let idx = supported.iter().position(|e| e.is_default).unwrap_or(0);
+        let entry = supported[idx];
+        let reason = if entry.is_default {
+            "GRUB default"
+        } else {
+            "first available"
+        };
+        println!("\n  Auto-selected entry {} ({}):", idx, reason);
+        println!("    Kernel: {}", entry.kernel);
+        println!(
+            "    Initrd: {}",
+            entry.initrd.as_deref().unwrap_or("(none)")
+        );
+        println!("    Params: {}", entry.params);
+        entry
+    } else {
+        println!("\n  Available SEV-SNP capable kernels:");
+        for (i, e) in supported.iter().enumerate() {
+            let marker = if e.is_default { " (default)" } else { "" };
+            println!("    [{}] {}{}", i, e.kernel, marker);
+        }
+        print!("\n  Enter entry number (0-{}): ", supported.len() - 1);
+        io::stdout().flush()?;
+        let mut line = String::new();
+        io::stdin().read_line(&mut line)?;
+        let idx: usize = line
+            .trim()
+            .parse()
+            .with_context(|| format!("Invalid entry number: {}", line.trim()))?;
+        if idx >= supported.len() {
+            bail!(
+                "Entry number {} out of range (0-{})",
+                idx,
+                supported.len() - 1
+            );
+        }
+        let entry = supported[idx];
+        println!("\n  Selected entry {}:", idx);
+        println!("    Kernel: {}", entry.kernel);
+        println!(
+            "    Initrd: {}",
+            entry.initrd.as_deref().unwrap_or("(none)")
+        );
+        println!("    Params: {}", entry.params);
+        entry
+    };
+
+    // Grub paths are relative to the boot partition root (e.g. /vmlinuz-6.8-generic).
+    // On systems with a separate /boot partition they are not directly accessible
+    // without the /boot prefix.  Match the same logic used in image convert.
+    let kernel_file = if selected.kernel.starts_with("/boot") {
+        selected.kernel.clone()
+    } else {
+        format!("/boot{}", selected.kernel)
+    };
+    let kernel_bytes = fs::read(&kernel_file)
+        .with_context(|| format!("Failed to read kernel: {}", kernel_file))?;
+
+    let initrd_bytes = selected
+        .initrd
+        .as_ref()
+        .map(|p| {
+            let initrd_file = if p.starts_with("/boot") {
+                p.clone()
+            } else {
+                format!("/boot{}", p)
+            };
+            fs::read(&initrd_file)
+                .with_context(|| format!("Failed to read initrd: {}", initrd_file))
+        })
+        .transpose()?;
+
+    Ok((kernel_bytes, initrd_bytes, selected.params.clone()))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_attest_renew(
     url: &str,
     ca_cert: &str,
     identity_pub: &str,
-    _grub_cfg: &Path,
-    _interactive: bool,
+    grub_cfg: &Path,
+    interactive: bool,
     out_bundle: Option<&Path>,
     firmware: Option<&Path>,
     kernel: Option<&Path>,
@@ -566,23 +688,41 @@ async fn run_attest_renew(
     let client = build_client(ca_cert)?;
     let base = normalize_https(url)?;
 
-    // Collect optional artifact bytes
     let mut firmware_data: Option<Vec<u8>> = None;
-    let mut kernel_data: Option<Vec<u8>> = None;
-    let mut initrd_data: Option<Vec<u8>> = None;
-    let mut params_data: Option<String> = None;
+    let mut kernel_data: Option<Vec<u8>>;
+    let mut initrd_data: Option<Vec<u8>>;
+    let mut params_data: Option<String>;
+
+    if let (Some(k), Some(i), Some(p)) = (kernel, initrd, kernel_params) {
+        // All three boot artifacts provided explicitly -- skip grub discovery entirely.
+        kernel_data = Some(fs::read(k)?);
+        initrd_data = Some(fs::read(i)?);
+        params_data = Some(p.to_string());
+    } else {
+        // Discover from grub.cfg; explicit overrides below take precedence.
+        let (grub_kernel, grub_initrd, grub_params) =
+            discover_boot_artifacts(grub_cfg, interactive)?;
+        kernel_data = Some(grub_kernel);
+        initrd_data = grub_initrd;
+        params_data = if grub_params.is_empty() {
+            None
+        } else {
+            Some(grub_params)
+        };
+
+        if let Some(path) = kernel {
+            kernel_data = Some(fs::read(path)?);
+        }
+        if let Some(path) = initrd {
+            initrd_data = Some(fs::read(path)?);
+        }
+        if let Some(p) = kernel_params {
+            params_data = Some(p.to_string());
+        }
+    }
 
     if let Some(path) = firmware {
         firmware_data = Some(fs::read(path)?);
-    }
-    if let Some(path) = kernel {
-        kernel_data = Some(fs::read(path)?);
-    }
-    if let Some(path) = initrd {
-        initrd_data = Some(fs::read(path)?);
-    }
-    if let Some(p) = kernel_params {
-        params_data = Some(p.to_string());
     }
 
     // Fetch a fresh server nonce to prove request freshness.
