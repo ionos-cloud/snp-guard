@@ -390,7 +390,22 @@ Deletion is permanent and removes all associated artifacts.
   - `--ca-cert`: Path to CA certificate (optional, defaults to `/etc/snpguard/ca.pem`)
   - `--sealed-blob`: Path to sealed VMK blob (optional, if not provided reads from `/etc/snpguard/vmk.sealed`)
 
-**Note**: This command is typically used by the initrd hook during boot, not manually.
+- `attest report --sealed-blob <PATH>`: Perform online attestation and output the decrypted VMK
+  in hex format to stdout.  Used by the initrd hook during boot.
+  - `--sealed-blob`: Path to sealed VMK blob (default: `/etc/snpguard/vmk.sealed`)
+
+- `attest renew [--grub-cfg <PATH>] [--interactive] [--out-bundle <PATH>] [--firmware <PATH>] [--kernel <PATH>] [--initrd <PATH>] [--kernel-params <STRING>]`:
+  Request an artifact renewal from inside the running VM.  The command reads the boot kernel
+  and initrd from `--grub-cfg` (default: `/boot/grub/grub.cfg`); pass `--interactive` to
+  choose among multiple SEV-SNP capable entries instead of auto-selecting the GRUB default.
+  The SNP report binds the submitted artifacts and nonces.  On success the server creates a
+  pending attestation record; if `--out-bundle` is given the client writes a tar.gz bundle
+  containing the local artifacts followed by the server-returned artifacts (id-block, auth-block,
+  launch-config).  Omitted per-artifact overrides are inherited from the current record on the
+  server.  The VM must be relaunched with the new artifacts for the pending record to be promoted
+  to current.
+
+**Note**: Both subcommands are intended for use inside the guest VM (initrd or running OS), not from the management host.
 
 ### Management Commands
 
