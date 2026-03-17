@@ -30,4 +30,4 @@ rand = { version = "0.8", features = ["std_rng"] }
 sha2 = "0.10"
 ring = { version = "0.17", features = ["std"] }
 chrono = "0.4"
-rustix = { version = "1", features = ["process"] }
+rustix = { version = "1", features = ["process", "mount"] }

@@ -836,38 +836,40 @@ async fn run_attest_renew(
         println!("  {} ({} bytes)", artifact.filename, artifact.content.len());
     }
 
+    // Assemble local artifacts in canonical order: kernel, initrd, params, firmware.
+    let mut local_artifacts: Vec<ArtifactEntry> = Vec::new();
+    if let Some(data) = kernel_data {
+        local_artifacts.push(ArtifactEntry {
+            filename: "vmlinuz".to_string(),
+            content: data,
+        });
+    }
+    if let Some(data) = initrd_data {
+        local_artifacts.push(ArtifactEntry {
+            filename: "initrd.img".to_string(),
+            content: data,
+        });
+    }
+    if let Some(params) = params_data {
+        local_artifacts.push(ArtifactEntry {
+            filename: "kernel-params.txt".to_string(),
+            content: params.into_bytes(),
+        });
+    }
+    if let Some(data) = firmware_data {
+        local_artifacts.push(ArtifactEntry {
+            filename: "firmware-code.fd".to_string(),
+            content: data,
+        });
+    }
+
     if let Some(bundle_path) = out_bundle {
-        // Combine local artifacts first, then server-supplied artifacts.
-        // Local entries come from explicit overrides now; grub discovery will
-        // populate them in phase 4.
-        let mut all_artifacts: Vec<ArtifactEntry> = Vec::new();
-        if let Some(data) = firmware_data {
-            all_artifacts.push(ArtifactEntry {
-                filename: "firmware-code.fd".to_string(),
-                content: data,
-            });
-        }
-        if let Some(data) = kernel_data {
-            all_artifacts.push(ArtifactEntry {
-                filename: "vmlinuz".to_string(),
-                content: data,
-            });
-        }
-        if let Some(data) = initrd_data {
-            all_artifacts.push(ArtifactEntry {
-                filename: "initrd.img".to_string(),
-                content: data,
-            });
-        }
-        if let Some(params) = params_data {
-            all_artifacts.push(ArtifactEntry {
-                filename: "kernel-params.txt".to_string(),
-                content: params.into_bytes(),
-            });
-        }
+        let mut all_artifacts = local_artifacts;
         all_artifacts.extend(resp_payload.artifacts);
         write_artifact_bundle(bundle_path, &all_artifacts)?;
-        println!("Artifacts written to {:?}", bundle_path);
+        println!("Bundle written to {:?}", bundle_path);
+    } else {
+        write_to_launch_artifacts(&local_artifacts, &resp_payload.artifacts)?;
     }
 
     println!("Relaunch the VM with the updated artifacts to promote the pending record.");
@@ -895,6 +897,107 @@ fn write_artifact_bundle(path: &Path, artifacts: &[ArtifactEntry]) -> Result<()>
     archive
         .finish()
         .context("Failed to finalize bundle archive")?;
+    Ok(())
+}
+
+/// Write artifact files into the inactive LAUNCH_ARTIFACTS slot using an atomic A/B swap.
+///
+/// Mounts the LAUNCH_ARTIFACTS partition, determines the inactive slot by reading the
+/// current /artifacts symlink, writes all files there with per-file fsync, then atomically
+/// replaces the symlink and unmounts.
+fn write_to_launch_artifacts(
+    local_artifacts: &[ArtifactEntry],
+    server_artifacts: &[ArtifactEntry],
+) -> Result<()> {
+    use rustix::mount::{mount, unmount, MountFlags, UnmountFlags};
+    use std::ffi::CStr;
+
+    let label = Path::new("/dev/disk/by-label/LAUNCH_ARTIFACTS");
+    let device = fs::canonicalize(label).context("Failed to resolve LAUNCH_ARTIFACTS device")?;
+
+    let mountpoint = PathBuf::from(format!("/tmp/snpguard-mount-{}", std::process::id()));
+    fs::create_dir(&mountpoint)
+        .with_context(|| format!("Failed to create mountpoint {:?}", mountpoint))?;
+
+    mount(
+        &device,
+        &mountpoint,
+        "ext4",
+        MountFlags::empty(),
+        None::<&CStr>,
+    )
+    .with_context(|| format!("Failed to mount {:?} at {:?}", device, mountpoint))?;
+
+    let result = write_artifacts_ab(&mountpoint, local_artifacts, server_artifacts);
+
+    unmount(&mountpoint, UnmountFlags::empty())
+        .with_context(|| format!("Failed to unmount {:?}", mountpoint))?;
+    fs::remove_dir(&mountpoint)
+        .with_context(|| format!("Failed to remove mountpoint {:?}", mountpoint))?;
+
+    result
+}
+
+/// Write artifacts into the inactive slot directory and atomically update the /artifacts symlink.
+fn write_artifacts_ab(
+    root: &Path,
+    local_artifacts: &[ArtifactEntry],
+    server_artifacts: &[ArtifactEntry],
+) -> Result<()> {
+    use std::os::unix::fs::symlink;
+
+    let artifacts_link = root.join("artifacts");
+    let current = fs::read_link(&artifacts_link)
+        .context("Failed to read /artifacts symlink on LAUNCH_ARTIFACTS")?;
+    let current_str = current
+        .to_str()
+        .ok_or_else(|| anyhow!("Non-UTF8 /artifacts symlink target"))?;
+
+    let next_slot = match current_str {
+        "A" => "B",
+        "B" => "A",
+        other => bail!("Unexpected /artifacts slot value: {}", other),
+    };
+
+    let slot_dir = root.join(next_slot);
+    fs::create_dir_all(&slot_dir)
+        .with_context(|| format!("Failed to create slot directory {:?}", slot_dir))?;
+
+    for artifact in local_artifacts.iter().chain(server_artifacts.iter()) {
+        let dest = slot_dir.join(&artifact.filename);
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&dest)
+            .with_context(|| format!("Failed to open {:?} for writing", dest))?;
+        f.write_all(&artifact.content)
+            .with_context(|| format!("Failed to write {:?}", dest))?;
+        f.sync_all()
+            .with_context(|| format!("Failed to fsync {:?}", dest))?;
+    }
+
+    // fsync the slot directory to make the new files durable.
+    fs::File::open(&slot_dir)
+        .and_then(|d| d.sync_all())
+        .with_context(|| format!("Failed to fsync slot directory {:?}", slot_dir))?;
+
+    // Atomically replace the /artifacts symlink.
+    let tmp_link = root.join(".artifacts.new");
+    symlink(next_slot, &tmp_link)
+        .with_context(|| format!("Failed to create temp symlink {:?}", tmp_link))?;
+    fs::rename(&tmp_link, &artifacts_link)
+        .context("Failed to rename temp symlink over /artifacts")?;
+
+    // fsync the partition root to make the rename durable.
+    fs::File::open(root)
+        .and_then(|d| d.sync_all())
+        .with_context(|| format!("Failed to fsync partition root {:?}", root))?;
+
+    println!(
+        "Artifacts written to LAUNCH_ARTIFACTS slot {} (was {}).",
+        next_slot, current_str
+    );
     Ok(())
 }
 
