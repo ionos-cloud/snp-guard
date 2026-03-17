@@ -155,7 +155,7 @@ modify the QCOW2 image.
 images with their kernel parameters. By default, the GRUB default
 kernel is selected automatically; if no default is set in the GRUB
 configuration, the first SEV-SNP supported entry is used. Pass
-`--pick-kernel` to be prompted to choose interactively instead.
+`--interactive` to be prompted to choose interactively instead.
 
 **Note 4:** The OVMF firmware binary must include `SNP_KERNEL_HASHES`,
 which is achieved by the special AmdSevX64 build. Refer to [this

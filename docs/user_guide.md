@@ -107,7 +107,7 @@ cargo run --bin snpguard-image convert \
 
 - To use AMD SEV-SNP technology, SEV-SNP must be enabled in guest kernels, which is verified by the image tool. For example, default Debian cloud images support SEV-SNP starting from the Trixie distribution (Debian 13). Ubuntu introduced SEV-SNP support starting from Ubuntu Noble (Ubuntu 22.04).
 - The image tool requires `qemu-img` and `libguestfs` to be installed on the system for the `convert` subcommand to inspecet and modify the QCOW2 image.
-- The image tool lists the available kernels and initrd images with their kernel parameters. By default, the GRUB default kernel is selected automatically; if no default is set in the GRUB configuration, the first SEV-SNP supported entry is used. Pass `--pick-kernel` to be prompted to choose interactively instead.
+- The image tool lists the available kernels and initrd images with their kernel parameters. By default, the GRUB default kernel is selected automatically; if no default is set in the GRUB configuration, the first SEV-SNP supported entry is used. Pass `--interactive` to be prompted to choose interactively instead.
 - The OVMF firmware binary must include `SNP_KERNEL_HASHES`, which is achieved by the special AmdSevX64 build. Refer to [this guide](https://rouming.github.io/2025/04/01/coco-with-amd-sev.html#guest-ovmf-firmware) to build OVMF with `SNP_KERNEL_HASHES` enabled.
 - For the image `convert` tool, if you've run `snpguard-client config login`, the attestation URL, ingestion public key, CA certificate, and identity public key will be read from the stored configuration. Otherwise, you must provide them via `--attest-url`, `--ingestion-public-key`, `--ca-cert`, and `--identity-pub` options.
 
