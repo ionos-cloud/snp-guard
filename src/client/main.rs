@@ -541,6 +541,10 @@ async fn run_attest_report(url: &str, ca_cert: &str, sealed_blob: &Path) -> Resu
     Ok(())
 }
 
+fn is_root() -> bool {
+    rustix::process::getuid().is_root()
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_attest_renew(
     url: &str,
@@ -554,6 +558,11 @@ async fn run_attest_renew(
     initrd: Option<&Path>,
     kernel_params: Option<&str>,
 ) -> Result<()> {
+    // Reading boot artifacts from disk and interacting with /dev/sev-guest requires root.
+    if !is_root() {
+        bail!("attest renew must be run as root");
+    }
+
     let client = build_client(ca_cert)?;
     let base = normalize_https(url)?;
 
