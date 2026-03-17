@@ -118,7 +118,7 @@ enum Command {
         /// By default the GRUB default kernel is selected automatically, or the first entry if no
         /// default is set.
         #[arg(long)]
-        pick_kernel: bool,
+        interactive: bool,
         /// Install the offline attestation script (attest-offline.sh) instead of the default
         /// online-only script. The offline script derives a hardware-bound key from the SEV-SNP
         /// chip (VCEK + launch measurement) and stores it in LUKS slot 1 after the first
@@ -625,7 +625,7 @@ fn extract_boot_data(
     unsupported_entries: &[grub::GrubEntry],
     boot_partition: &BootPartition,
     no_hardening: bool,
-    pick_kernel: bool,
+    interactive: bool,
 ) -> Result<(Vec<u8>, Vec<u8>, String)> {
     use guestfs::UmountOptArgs;
 
@@ -748,7 +748,7 @@ fn extract_boot_data(
         }
         println!("    Parameters: {}", entry.params);
         entry
-    } else if !pick_kernel {
+    } else if !interactive {
         // Multiple supported entries - auto-select GRUB default, fallback to first
         let selected_idx = supported_entries
             .iter()
@@ -770,7 +770,7 @@ fn extract_boot_data(
         println!("    Parameters: {}", entry.params);
         entry
     } else {
-        // Multiple supported entries - ask user to select (--pick-kernel mode)
+        // Multiple supported entries - ask user to select (--interactive mode)
         print!(
             "\n  Enter entry number (0-{}): ",
             supported_entries.len() - 1
@@ -1216,7 +1216,7 @@ fn run_convert(
     identity_pub: Option<PathBuf>,
     firmware: PathBuf,
     no_hardening: bool,
-    pick_kernel: bool,
+    interactive: bool,
     offline_attestation: bool,
 ) -> Result<()> {
     let musl_client_path = "target/x86_64-unknown-linux-musl/release/snpguard-client";
@@ -1495,7 +1495,7 @@ fn run_convert(
         &unsupported_entries,
         &boot_partition,
         no_hardening,
-        pick_kernel,
+        interactive,
     )?;
 
     // Write artifacts to staging directory
@@ -1764,7 +1764,7 @@ fn main() -> Result<()> {
             identity_pub,
             firmware,
             no_hardening,
-            pick_kernel,
+            interactive,
             offline_attestation,
         } => run_convert(
             &in_image,
@@ -1776,7 +1776,7 @@ fn main() -> Result<()> {
             identity_pub,
             firmware,
             no_hardening,
-            pick_kernel,
+            interactive,
             offline_attestation,
         ),
         Command::Embed { image, in_bundle } => run_embed(&image, &in_bundle),
