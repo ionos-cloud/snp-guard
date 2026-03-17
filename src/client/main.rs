@@ -1,9 +1,10 @@
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand};
 use common::snpguard::{
-    AttestationRequest, AttestationResponse, CreateRecordRequest, CreateRecordResponse,
-    DeleteRecordResponse, GetRecordResponse, ListRecordsResponse, NonceRequest, NonceResponse,
-    RenewRequest, RenewRequestPayload, RenewResponse, RenewResponsePayload, ToggleEnabledResponse,
+    ArtifactEntry, AttestationRequest, AttestationResponse, CreateRecordRequest,
+    CreateRecordResponse, DeleteRecordResponse, GetRecordResponse, ListRecordsResponse,
+    NonceRequest, NonceResponse, RenewRequest, RenewRequestPayload, RenewResponse,
+    RenewResponsePayload, ToggleEnabledResponse,
 };
 use dirs::config_dir;
 use hpke::{
@@ -49,16 +50,25 @@ enum AttestCmd {
             default_value = "/etc/snpguard/identity.pub"
         )]
         identity_pub: String,
-        /// Staging directory: artifacts are read from here as input
-        /// and the response artifacts are written back.
+        /// Path to grub.cfg used to discover the boot kernel and initrd
+        #[arg(long, value_name = "PATH", default_value = "/boot/grub/grub.cfg")]
+        grub_cfg: PathBuf,
+        /// Prompt interactively when multiple SEV-SNP supported kernels are found in grub.cfg
+        #[arg(long, default_value_t = false)]
+        interactive: bool,
+        /// Write the response artifact bundle to this path (tar archive)
         #[arg(long, value_name = "PATH")]
-        staging_dir: Option<PathBuf>,
+        out_bundle: Option<PathBuf>,
+        /// Firmware image to send (overrides grub discovery)
         #[arg(long)]
         firmware: Option<PathBuf>,
+        /// Kernel binary to send (overrides grub discovery)
         #[arg(long)]
         kernel: Option<PathBuf>,
+        /// Initrd image to send (overrides grub discovery)
         #[arg(long)]
         initrd: Option<PathBuf>,
+        /// Kernel command-line parameters (overrides grub discovery)
         #[arg(long)]
         kernel_params: Option<String>,
     },
@@ -282,7 +292,9 @@ async fn main() -> Result<()> {
                 }
                 AttestCmd::Renew {
                     identity_pub,
-                    staging_dir,
+                    grub_cfg,
+                    interactive,
+                    out_bundle,
                     firmware,
                     kernel,
                     initrd,
@@ -292,7 +304,9 @@ async fn main() -> Result<()> {
                         &base,
                         &ca_path,
                         &identity_pub,
-                        staging_dir.as_deref(),
+                        &grub_cfg,
+                        interactive,
+                        out_bundle.as_deref(),
                         firmware.as_deref(),
                         kernel.as_deref(),
                         initrd.as_deref(),
@@ -532,7 +546,9 @@ async fn run_attest_renew(
     url: &str,
     ca_cert: &str,
     identity_pub: &str,
-    staging_dir: Option<&Path>,
+    _grub_cfg: &Path,
+    _interactive: bool,
+    out_bundle: Option<&Path>,
     firmware: Option<&Path>,
     kernel: Option<&Path>,
     initrd: Option<&Path>,
@@ -546,14 +562,6 @@ async fn run_attest_renew(
     let mut kernel_data: Option<Vec<u8>> = None;
     let mut initrd_data: Option<Vec<u8>> = None;
     let mut params_data: Option<String> = None;
-
-    if let Some(dir) = staging_dir {
-        let (fw, k, i, p, _) = read_staging_dir(dir)?;
-        firmware_data = fw;
-        kernel_data = k;
-        initrd_data = i;
-        params_data = p;
-    }
 
     if let Some(path) = firmware {
         firmware_data = Some(fs::read(path)?);
@@ -595,10 +603,10 @@ async fn run_attest_renew(
     let payload = RenewRequestPayload {
         server_nonce: server_nonce.clone(),
         client_nonce: client_nonce.clone(),
-        firmware: firmware_data,
-        kernel: kernel_data,
-        initrd: initrd_data,
-        kernel_params: params_data,
+        firmware: firmware_data.clone(),
+        kernel: kernel_data.clone(),
+        initrd: initrd_data.clone(),
+        kernel_params: params_data.clone(),
     };
     let mut payload_bytes = Vec::new();
     payload.encode(&mut payload_bytes)?;
@@ -666,18 +674,65 @@ async fn run_attest_renew(
         println!("  {} ({} bytes)", artifact.filename, artifact.content.len());
     }
 
-    if let Some(dir) = staging_dir {
-        fs::create_dir_all(dir)
-            .with_context(|| format!("Failed to create staging dir {:?}", dir))?;
-        for artifact in &resp_payload.artifacts {
-            let dest = dir.join(&artifact.filename);
-            fs::write(&dest, &artifact.content)
-                .with_context(|| format!("Failed to write artifact {:?}", dest))?;
+    if let Some(bundle_path) = out_bundle {
+        // Combine local artifacts first, then server-supplied artifacts.
+        // Local entries come from explicit overrides now; grub discovery will
+        // populate them in phase 4.
+        let mut all_artifacts: Vec<ArtifactEntry> = Vec::new();
+        if let Some(data) = firmware_data {
+            all_artifacts.push(ArtifactEntry {
+                filename: "firmware-code.fd".to_string(),
+                content: data,
+            });
         }
-        println!("Artifacts written to {:?}", dir);
+        if let Some(data) = kernel_data {
+            all_artifacts.push(ArtifactEntry {
+                filename: "vmlinuz".to_string(),
+                content: data,
+            });
+        }
+        if let Some(data) = initrd_data {
+            all_artifacts.push(ArtifactEntry {
+                filename: "initrd.img".to_string(),
+                content: data,
+            });
+        }
+        if let Some(params) = params_data {
+            all_artifacts.push(ArtifactEntry {
+                filename: "kernel-params.txt".to_string(),
+                content: params.into_bytes(),
+            });
+        }
+        all_artifacts.extend(resp_payload.artifacts);
+        write_artifact_bundle(bundle_path, &all_artifacts)?;
+        println!("Artifacts written to {:?}", bundle_path);
     }
 
     println!("Relaunch the VM with the updated artifacts to promote the pending record.");
+    Ok(())
+}
+
+/// Write a list of artifact entries to a gzip-compressed tar archive at `path`.
+fn write_artifact_bundle(path: &Path, artifacts: &[ArtifactEntry]) -> Result<()> {
+    use flate2::{write::GzEncoder, Compression};
+    use tar::Builder;
+
+    let file = fs::File::create(path)
+        .with_context(|| format!("Failed to create bundle file {:?}", path))?;
+    let gz = GzEncoder::new(file, Compression::default());
+    let mut archive = Builder::new(gz);
+    for artifact in artifacts {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(artifact.content.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        archive
+            .append_data(&mut header, &artifact.filename, artifact.content.as_slice())
+            .with_context(|| format!("Failed to append {} to bundle", artifact.filename))?;
+    }
+    archive
+        .finish()
+        .context("Failed to finalize bundle archive")?;
     Ok(())
 }
 
