@@ -119,7 +119,7 @@ SnpGuard is a SEV-SNP attestation service that verifies the integrity of guest V
 
 **Installation**:
 - Installed automatically during `snpguard-image convert`
-- Hook scripts (`hook.sh` and `attest.sh`) are installed into the guest image
+- Hook scripts (`hook.sh` and `attest-online.sh` or `attest-offline.sh`) are installed into the guest image
 - Initrd is regenerated with hooks included
 - Currently supports initramfs-tools (Debian/Ubuntu) only
 - Dracut support is in progress

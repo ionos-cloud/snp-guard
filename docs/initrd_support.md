@@ -6,13 +6,16 @@ SnpGuard supports **initramfs-tools** (used by Ubuntu/Debian) for installing att
 
 The attestation hooks are automatically installed during the image conversion phase using `snpguard-image convert`. The conversion process:
 
-1. Encrypts the root filesystem with LUKS2
+1. Encrypts the root filesystem with LUKS2 (label: `snpguard-luks`)
 2. Installs `cryptsetup-initramfs` package in the guest image
-3. Uploads the SnpGuard client binary and configuration files
-4. Installs initramfs-tools hooks:
+3. Writes `/etc/default/grub.d/90_snpguard.cfg` disabling UUID/PARTUUID in grub entries
+4. Rewrites the root entry in `/etc/fstab` to `/dev/mapper/cryptroot`
+5. Uploads the SnpGuard client binary and configuration files
+6. Installs initramfs-tools hooks:
    - `hook.sh` → `/etc/initramfs-tools/hooks/snpguard` (installs client and config into initrd)
-   - `attest.sh` → `/etc/initramfs-tools/scripts/local-top/snpguard-attest` (runs attestation during boot)
-5. Regenerates the initrd using `update-initramfs -u -k all`
+   - `attest-online.sh` or `attest-offline.sh` → `/etc/initramfs-tools/scripts/local-top/snpguard-attest`
+7. Regenerates the initrd using `update-initramfs -u -k all`
+8. Regenerates grub configuration using `update-grub`
 
 The hooks are installed directly into the guest image filesystem, and the initrd is regenerated automatically. No manual repacking is required.
 
@@ -27,10 +30,13 @@ The image conversion installs two files:
    - Purpose: Runs during initrd generation to include the SnpGuard client binary and configuration files
    - Includes: `snpguard-client` binary, CA certificate, identity public key, attestation URL, sealed VMK blob
 
-2. **Attestation Script** (`scripts/initramfs-tools/attest.sh`):
+2. **Attestation Script** (`scripts/initramfs-tools/attest-online.sh` or `attest-offline.sh`):
    - Installed at: `/etc/initramfs-tools/scripts/local-top/snpguard-attest`
    - Purpose: Runs during boot to perform attestation and unlock the encrypted root filesystem
    - Phase: `local-top` (after network initialization, before root mounting)
+   - `attest-online.sh`: contacts the snpguard server on every boot (default)
+   - `attest-offline.sh`: derives a hardware-bound key from the SEV-SNP chip for offline unlocking;
+     falls back to online attestation on first boot or after chip migration
 
 ### Boot Phase
 
@@ -40,16 +46,21 @@ The image conversion installs two files:
 
 ### Hook Behavior
 
-The attestation script (`attest.sh`) performs the following:
+The attestation script performs the following (online variant):
 
 1. **Network Setup**: Ensures network is configured and routing is correct
-2. **Read Configuration**: Reads attestation URL from `/etc/snpguard/attest.url`
-3. **Perform Attestation**: Calls `/usr/bin/snpguard-client attest` with:
-   - URL from config file
+2. **Record boot slot**: Writes `/.booted` symlink on the LAUNCH_ARTIFACTS partition
+3. **Resolve root device**: Looks up the LUKS container via `/dev/disk/by-label/snpguard-luks`
+4. **Perform Attestation**: Calls `/usr/bin/snpguard-client attest` with:
+   - URL from `/etc/snpguard/attest.url`
    - CA certificate from `/etc/snpguard/ca.pem`
    - Sealed VMK blob from `/etc/snpguard/vmk.sealed`
-4. **Unlock Root**: Uses the decrypted VMK to unlock the LUKS-encrypted root device
-5. **Error Handling**: Exits with error if attestation fails
+5. **Unlock Root**: Uses the decrypted VMK to unlock the LUKS-encrypted root device via `cryptsetup luksOpen`
+6. **Error Handling**: Drops to a shell if any step fails
+
+The offline variant skips the network on subsequent boots by first trying a hardware-bound key
+derived from the SEV-SNP chip (LUKS slot 1), and only falls back to the online flow when the
+derived key does not match (first boot, chip migration).
 
 ### Supported Distributions
 
@@ -74,14 +85,13 @@ The complete boot sequence with SnpGuard attestation:
 ```
 1. Kernel loads
 2. Initrd starts
-3. Network initialization
-4. [SnpGuard Hook Runs Here] ← Attestation happens
-   - Reads attestation URL from /etc/snpguard/attest.url
-   - Calls snpguard-client (uses sev library directly)
-   - Receives decrypted VMK
-   - Unlocks LUKS-encrypted root device
-5. Root filesystem mounting
-6. System boot continues
+3. [SnpGuard Hook Runs Here] <- Attestation happens
+   - Resolves LUKS root device via /dev/disk/by-label/snpguard-luks
+   - (offline) Tries hardware-bound derived key from SEV-SNP chip (LUKS slot 1)
+   - (online fallback) Network initialized, snpguard-client contacts server,
+     receives decrypted VMK, unlocks LUKS root via cryptsetup luksOpen
+4. Root filesystem mounting (/dev/mapper/cryptroot)
+5. System boot continues
 ```
 
 ## Usage

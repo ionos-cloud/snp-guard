@@ -84,16 +84,19 @@ cargo run --bin snpguard-image convert \
 **What the conversion does:**
 
 1. Increase the target QCOW image and root filesystem partition sizes
-1. Encrypts the target root filesystem with LUKS2
+1. Encrypts the target root filesystem with LUKS2 (label: `snpguard-luks`)
 1. Generates a random Volume Master Key (VMK) for disk encryption
 1. Generates an unsealing keypair internally (used to encrypt the VMK)
 1. Encrypts the unsealing private key using the public SnpGuard server's ingestion key and places it in the staging directory
 1. Encrypts (seals) the VMK with the unsealing public key
 1. Uploads the sealed VMK into the guest image
 1. Installs `cryptsetup-initramfs` in the guest image
+1. Writes `/etc/default/grub.d/90_snpguard.cfg` to disable UUID/PARTUUID in grub entries
+1. Rewrites the root entry in `/etc/fstab` to point at `/dev/mapper/cryptroot`
 1. Installs the SnpGuard client binary and configuration files (CA cert, identity public key, attestation URL, sealed VMK)
-1. Installs initramfs-tools hooks (`hook.sh` and `attest-online.sh`)
-1. Regenerates the initrd with hooks included
+1. Installs initramfs-tools hooks (`hook.sh` and `attest-online.sh` or `attest-offline.sh`)
+1. Regenerates the initrd with hooks included (`update-initramfs -u -k all`)
+1. Regenerates the grub configuration (`update-grub`)
 1. Extracts boot artifacts (kernel, initrd, kernel parameters, firmware) to the staging directory
 
 **Prerequisites:**
