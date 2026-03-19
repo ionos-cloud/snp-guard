@@ -462,7 +462,30 @@ fn verify_sev_guest_support(g: &guestfs::Handle, kernel_path: &str) -> Result<Se
 #[derive(Debug, Clone)]
 enum BootPartition {
     Rootfs,
-    Boot(String), // device path
+    Boot(i32), // partition number (from part_to_partnum)
+}
+
+/// Returns the device path of the partition numbered `partnum` on the
+/// same disk as `any_part` (any partition on that disk suffices).
+fn find_partition_dev(g: &guestfs::Handle, target_rootfs: &str, partnum: i32) -> Result<String> {
+    let target_disk = g
+        .part_to_dev(target_rootfs)
+        .map_err(|e| anyhow!("Failed to get target disk from {}: {:?}", target_rootfs, e))?;
+    let partitions = g
+        .list_partitions()
+        .map_err(|e| anyhow!("Failed to list partitions: {:?}", e))?;
+    for part in partitions {
+        let part_disk = g.part_to_dev(&part).ok();
+        let part_num = g.part_to_partnum(&part).ok();
+        if part_disk.as_deref() == Some(&target_disk) && part_num == Some(partnum) {
+            return Ok(part);
+        }
+    }
+    bail!(
+        "Boot partition number {} not found on target disk {}",
+        partnum,
+        target_disk
+    )
 }
 
 /// Inspects source image to find GRUB entries and verify SEV-SNP support.
@@ -533,7 +556,10 @@ fn inspect_source_image_boot_data(
                 {
                     println!("  Found /boot partition at: {}", part);
                     grub_cfg_path = boot_check_grub.to_string();
-                    boot_partition = BootPartition::Boot(part);
+                    let partnum = g.part_to_partnum(&part).map_err(|e| {
+                        anyhow!("Failed to get partition number for {}: {:?}", part, e)
+                    })?;
+                    boot_partition = BootPartition::Boot(partnum);
                     break;
                 }
                 // Umount previously mounted bootcheck_dir, we continue mounting other partitions
@@ -675,7 +701,9 @@ fn extract_boot_data(
             println!("  Mounted decrypted target rootfs as /");
             None // Boot is on rootfs, so no separate boot mount
         }
-        BootPartition::Boot(boot_dev) => {
+        BootPartition::Boot(partnum) => {
+            let boot_dev = find_partition_dev(g, target_rootfs, *partnum)?;
+
             // Mount scratch rootfs temporarily (needed for creating mount points)
             g.mount(scratch_rootfs, "/")
                 .map_err(|e| anyhow!("Failed to mount {}: {:?}", scratch_rootfs, e))?;
@@ -695,7 +723,7 @@ fn extract_boot_data(
                 }
             }));
 
-            g.mount_ro(boot_dev, boot_mountpoint)
+            g.mount_ro(&boot_dev, boot_mountpoint)
                 .map_err(|e| anyhow!("Failed to mount boot partition {}: {:?}", boot_dev, e))?;
             _guards.borrow_mut().push(Box::new(move || {
                 if let Err(e) = g.umount(boot_mountpoint, UmountOptArgs::default()) {
@@ -1207,9 +1235,10 @@ fn install_snpguard_on_target(
     }
 
     // Mount separate /boot if needed
-    if let BootPartition::Boot(boot_dev) = boot_partition {
+    if let BootPartition::Boot(partnum) = boot_partition {
+        let boot_dev = find_partition_dev(g, target_rootfs, *partnum)?;
         let boot_mountpoint = "/boot";
-        g.mount(boot_dev, boot_mountpoint)
+        g.mount(&boot_dev, boot_mountpoint)
             .map_err(|e| anyhow!("Failed to mount boot partition {}: {:?}", boot_dev, e))?;
     }
 
