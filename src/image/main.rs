@@ -22,6 +22,11 @@ use std::path::{Path, PathBuf};
 
 const REQUIRED_FREE_BYTES: u64 = 500 * 1024 * 1024;
 
+/// LUKS2 filesystem label applied to the encrypted root partition.
+/// The initramfs locates the root device by this label via
+/// /dev/disk/by-label/snpguard-luks, independent of device ordering.
+const LUKS_ROOT_LABEL: &str = "snpguard-luks";
+
 /// Round down `value` in bytes to 1MB
 fn round_down_1mb(value: u64) -> u64 {
     const MB: u64 = 1024 * 1024;
@@ -942,9 +947,32 @@ fn encrypt_and_copy_rootfs(
         }
     }
 
+    // Use cryptsetup directly from the debug API because the guestfs
+    // Rust binding does not expose the --label option.
+    g.debug(
+        "sh",
+        &[&format!(
+            "cryptsetup config {} --label {}",
+            target_rootfs, LUKS_ROOT_LABEL
+        )],
+    )
+    .map_err(|e| anyhow!("Failed to assign label for LUKS: {:?}", e))?;
+
+    // Copy the source rootfs label to the target rootfs
+    let rootfs_label = g
+        .get_e2label(source_rootfs)
+        .map_err(|e| anyhow!("Failed to get a label on source rootfs: {:?}", e))?;
+
     // Format the inner filesystem
-    g.mkfs("ext4", "/dev/mapper/cryptroot", MkfsOptArgs::default())
-        .map_err(|e| anyhow!("Failed to mkfs ext4: {:?}", e))?;
+    g.mkfs(
+        "ext4",
+        "/dev/mapper/cryptroot",
+        MkfsOptArgs {
+            label: rootfs_label.is_empty().then_some(rootfs_label.as_str()),
+            ..Default::default()
+        },
+    )
+    .map_err(|e| anyhow!("Failed to mkfs ext4: {:?}", e))?;
 
     g.mount("/dev/mapper/cryptroot", target_dir)
         .map_err(|e| anyhow!("Failed to mount /dev/mapper/cryptroot: {:?}", e))?;
@@ -1045,7 +1073,6 @@ pub fn upload_snpguard_files(
 #[allow(clippy::too_many_arguments)]
 fn install_snpguard_on_target(
     g: &guestfs::Handle,
-    source_rootfs: &str,
     target_rootfs: &str,
     vmk: &[u8],
     supported_entries: &Vec<GrubEntry>,
@@ -1164,22 +1191,6 @@ fn install_snpguard_on_target(
         .sh(&cmd)
         .map_err(|e| anyhow!("Failed to execute '{}': {:?}", cmd, e))?;
     //println!("{}", _out);
-
-    // Copy the source rootfs label to the target rootfs after
-    // `cryptsetup` is installed.
-    let rootfs_label = g
-        .get_e2label(source_rootfs)
-        .map_err(|e| anyhow!("Failed to get a label on source rootfs: {:?}", e))?;
-
-    if !rootfs_label.is_empty() {
-        let _out = g
-            .sh(&format!(
-                "cryptsetup config {} --label {}",
-                target_rootfs, rootfs_label
-            ))
-            .map_err(|e| anyhow!("Failed to execute 'cryptsetup config': {:?}", e))?;
-        //println!("{}", _out);
-    }
 
     Ok(())
 }
@@ -1463,7 +1474,6 @@ fn run_convert(
         println!("Install snpguard-client on target and update initrd...");
         install_snpguard_on_target(
             &g,
-            &source_rootfs,
             &target_rootfs,
             &vmk,
             &supported_entries,
