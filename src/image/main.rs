@@ -1070,6 +1070,88 @@ pub fn upload_snpguard_files(
     Ok(())
 }
 
+/// Rewrite the root entry in an fstab string.
+///
+/// Finds the line whose second column (mount point) is `/` and replaces the
+/// first column (device) with `new_device` and the third column (fs type)
+/// with `new_fstype`.  All other columns and all other lines are preserved
+/// verbatim, including comments and blank lines.
+fn rewrite_fstab_root(fstab: &str, new_device: &str, new_fstype: &str) -> Result<String> {
+    let mut found = false;
+    let mut lines: Vec<String> = Vec::new();
+
+    for line in fstab.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            lines.push(line.to_string());
+            continue;
+        }
+        let fields: Vec<&str> = trimmed.split_whitespace().collect();
+        if fields.len() >= 2 && fields[1] == "/" {
+            found = true;
+            let options = fields.get(3).copied().unwrap_or("defaults");
+            let dump = fields.get(4).copied().unwrap_or("0");
+            let pass = fields.get(5).copied().unwrap_or("0");
+            lines.push(format!(
+                "{}\t/\t{}\t{}\t{}\t{}",
+                new_device, new_fstype, options, dump, pass
+            ));
+        } else {
+            lines.push(line.to_string());
+        }
+    }
+
+    if !found {
+        bail!("No root (/) entry found in /etc/fstab");
+    }
+
+    let mut result = lines.join("\n");
+    if fstab.ends_with('\n') {
+        result.push('\n');
+    }
+    Ok(result)
+}
+
+/// Write grub overrides and update fstab.
+///
+/// Must be called after packages are installed and before
+/// update-initramfs / update-grub so that both tools pick up all
+/// changes on their first and only run.
+fn configure_boot_for_encrypted_root(g: &guestfs::Handle) -> Result<()> {
+    // Suppress PARTUUID/UUID in grub menu entries.  With
+    // GRUB_DISABLE_LINUX_UUID and GRUB_DISABLE_LINUX_PARTUUID both
+    // set to true, grub-mkconfig will emit the root device path
+    // directly (e.g.  /dev/mapper/cryptroot from fstab) instead of a
+    // UUID or PARTUUID that points to the raw partition.
+    let grub_snippet = "GRUB_DISABLE_LINUX_UUID=true\nGRUB_DISABLE_LINUX_PARTUUID=true\n";
+    g.mkdir_p("/etc/default/grub.d")
+        .map_err(|e| anyhow!("Failed to create /etc/default/grub.d: {:?}", e))?;
+    g.write(
+        "/etc/default/grub.d/90_snpguard.cfg",
+        grub_snippet.as_bytes(),
+    )
+    .map_err(|e| {
+        anyhow!(
+            "Failed to write /etc/default/grub.d/90_snpguard.cfg: {:?}",
+            e
+        )
+    })?;
+
+    // Rewrite /etc/fstab: point the root entry at the decrypted
+    // mapper device so the kernel mounts the right filesystem after
+    // initramfs unlocks LUKS.
+    let fstab_bytes = g
+        .read_file("/etc/fstab")
+        .map_err(|e| anyhow!("Failed to read /etc/fstab: {:?}", e))?;
+    let fstab_str = String::from_utf8(fstab_bytes)
+        .map_err(|e| anyhow!("/etc/fstab is not valid UTF-8: {}", e))?;
+    let new_fstab = rewrite_fstab_root(&fstab_str, "/dev/mapper/cryptroot", "ext4")?;
+    g.write("/etc/fstab", new_fstab.as_bytes())
+        .map_err(|e| anyhow!("Failed to write /etc/fstab: {:?}", e))?;
+
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn install_snpguard_on_target(
     g: &guestfs::Handle,
@@ -1115,8 +1197,8 @@ fn install_snpguard_on_target(
             .map_err(|e| anyhow!("Failed to mount boot partition {}: {:?}", boot_dev, e))?;
     }
 
-    // Installation and initramfs commands
-    let (install_cmds, update_initramfs_cmd): (Vec<String>, Vec<String>) = match dist_family {
+    // Installation and update commands
+    let (install_cmds, update_cmd): (Vec<String>, Vec<String>) = match dist_family {
         DistroFamily::Debian | DistroFamily::Ubuntu => {
             let mut install = vec![
                 // brings the whole network up
@@ -1148,10 +1230,13 @@ fn install_snpguard_on_target(
                 install.push(format!("apt install -y {}", extra_modules_pkg));
             }
 
-            // Update initramfs
-            let update_initramfs = vec!["update-initramfs -u -k all".to_string()];
+            // Update initramfs grub. Order matters: initramfs first so
+            let update = vec![
+                "update-initramfs -u -k all".to_string(),
+                "update-grub".to_string(),
+            ];
 
-            (install, update_initramfs)
+            (install, update)
         }
         DistroFamily::RedHat => bail!("RedHat distributions are not supported at the moment"),
     };
@@ -1173,6 +1258,11 @@ fn install_snpguard_on_target(
         .map_err(|e| anyhow!("Failed to execute '{}': {:?}", cmd, e))?;
     //println!("{}", _out);
 
+    // Configure grub, fstab for the encrypted root.
+    // Called after packages so cryptsetup-initramfs is available, and before
+    // update-initramfs / update-grub so both tools see the new configuration.
+    configure_boot_for_encrypted_root(g)?;
+
     // Upload required files
     upload_snpguard_files(
         g,
@@ -1185,8 +1275,8 @@ fn install_snpguard_on_target(
         local_top_path,
     )?;
 
-    // Run update initramfs commands
-    let cmd = update_initramfs_cmd.join("; ");
+    // Run update commands
+    let cmd = update_cmd.join("; ");
     let _out = g
         .sh(&cmd)
         .map_err(|e| anyhow!("Failed to execute '{}': {:?}", cmd, e))?;
