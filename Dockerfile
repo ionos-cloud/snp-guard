@@ -53,6 +53,10 @@ WORKDIR /app
 # Environment variables
 ENV RUST_LOG=info
 ENV DATA_DIR=/data
+# Set NO_TLS=1 (default) for PaaS / containerized deployments where TLS is
+# terminated by the platform (fly.io, Railway, Render, etc.).
+# Override with NO_TLS= (empty) to enable self-managed TLS inside the container.
+ENV NO_TLS=1
 
 # Create data directory
 RUN mkdir -p /data
@@ -67,5 +71,6 @@ EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
   CMD curl -f http://localhost:3000/ || exit 1
 
-# Run migration first, then start the server
-ENTRYPOINT ["/bin/sh", "-c", "cd /app && DATA_DIR=${DATA_DIR:-/data} && mkdir -p ${DATA_DIR}/db && /usr/local/bin/migration up -u sqlite://${DATA_DIR}/db/snpguard.sqlite?mode=rwc && DATA_DIR=${DATA_DIR} /usr/local/bin/snpguard-server"]
+# Run migration first, then start the server.
+# Pass --no-tls when NO_TLS is non-empty (the default for PaaS deployments).
+ENTRYPOINT ["/bin/sh", "-c", "cd /app && DATA_DIR=${DATA_DIR:-/data} && mkdir -p ${DATA_DIR}/db && /usr/local/bin/migration up -u sqlite://${DATA_DIR}/db/snpguard.sqlite?mode=rwc && DATA_DIR=${DATA_DIR} /usr/local/bin/snpguard-server ${NO_TLS:+--no-tls}"]
