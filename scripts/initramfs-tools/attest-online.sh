@@ -122,7 +122,6 @@ REAL_ROOT="$(readlink -f /dev/disk/by-label/snpguard-luks)" \
 echo "snpguard attest: performing remote attestation..."
 VMK="$(/usr/bin/snpguard-client attest \
     --url "$(cat /etc/snpguard/attest.url)" \
-    --ca-cert /etc/snpguard/ca.pem \
     report \
     --sealed-blob /etc/snpguard/vmk.sealed)" || panic "snpguard attest: attestation failed"
 
