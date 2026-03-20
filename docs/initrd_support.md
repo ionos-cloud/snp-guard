@@ -28,7 +28,9 @@ The image conversion installs two files:
 1. **Hook Script** (`scripts/initramfs-tools/hook.sh`):
    - Installed at: `/etc/initramfs-tools/hooks/snpguard`
    - Purpose: Runs during initrd generation to include the SnpGuard client binary and configuration files
-   - Includes: `snpguard-client` binary, CA certificate, identity public key, attestation URL, sealed VMK blob
+   - Includes: `snpguard-client` binary, identity public key, attestation URL, sealed VMK blob, and
+     CA certificate (only present for self-signed / private CA deployments; omitted when the server
+     uses a public CA since the client falls back to its built-in webpki root bundle)
 
 2. **Attestation Script** (`scripts/initramfs-tools/attest-online.sh` or `attest-offline.sh`):
    - Installed at: `/etc/initramfs-tools/scripts/local-top/snpguard-attest`
@@ -53,7 +55,8 @@ The attestation script performs the following (online variant):
 3. **Resolve root device**: Looks up the LUKS container via `/dev/disk/by-label/snpguard-luks`
 4. **Perform Attestation**: Calls `/usr/bin/snpguard-client attest` with:
    - URL from `/etc/snpguard/attest.url`
-   - CA certificate from `/etc/snpguard/ca.pem`
+   - CA certificate from `/etc/snpguard/ca.pem` if present (self-signed CA); otherwise the
+     client uses its built-in webpki root bundle (public CA / platform TLS)
    - Sealed VMK blob from `/etc/snpguard/vmk.sealed`
 5. **Unlock Root**: Uses the decrypted VMK to unlock the LUKS-encrypted root device via `cryptsetup luksOpen`
 6. **Error Handling**: Drops to a shell if any step fails
@@ -125,7 +128,7 @@ ls -la staging/initrd.img
 
 The initrd contains:
 - `/usr/bin/snpguard-client` (client binary)
-- `/etc/snpguard/ca.pem` (CA certificate)
+- `/etc/snpguard/ca.pem` (CA certificate; only present for self-signed / private CA deployments)
 - `/etc/snpguard/identity.pub` (server Ed25519 identity public key, used to verify renewal responses)
 - `/etc/snpguard/attest.url` (attestation URL)
 - `/etc/snpguard/vmk.sealed` (sealed VMK blob)

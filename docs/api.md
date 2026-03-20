@@ -342,9 +342,9 @@ Currently, there is no rate limiting implemented. Consider adding rate limiting 
 
 4. **Key Encryption**: ID-Block keys, Auth-Block keys, and unsealing private keys are all encrypted with HPKE (Hybrid Public Key Encryption) using X25519HkdfSha256, HkdfSha256, and AesGcm256 before storage. The ingestion private key (`/data/auth/ingestion.key`) must be backed up securely - if lost, encrypted keys cannot be recovered. The ingestion public key is available via `GET /v1/public/info` for TOFU and client-side encryption. ID and Auth key files are deleted from the artifacts folder after encryption and storage in the database.
 
-6. **Server Identity Key**: The server generates a stable Ed25519 signing keypair on first start and persists it at `/data/auth/identity.key` (private, PKCS#8 DER in PEM, mode 0400) and `/data/auth/identity.pub` (public, raw 32 bytes in PEM). The private key is used to sign artifacts sent to guests in RenewResponse messages. The public key is exposed via `GET /v1/public/info` and is meant to be baked into the guest initrd during image conversion, so the guest can verify artifact authenticity without trusting the network. Back up `identity.key` alongside `ingestion.key` - regenerating it would invalidate all previously prepared guest images.
+5. **Server Identity Key**: The server generates a stable Ed25519 signing keypair on first start and persists it at `/data/auth/identity.key` (private, PKCS#8 DER in PEM, mode 0400) and `/data/auth/identity.pub` (public, raw 32 bytes in PEM). The private key is used to sign artifacts sent to guests in RenewResponse messages. The public key is exposed via `GET /v1/public/info` and is meant to be baked into the guest initrd during image conversion, so the guest can verify artifact authenticity without trusting the network. Back up `identity.key` alongside `ingestion.key` - regenerating it would invalidate all previously prepared guest images.
 
-5. **TOFU (Trust On First Use)**: During `config login`, the client makes a raw TLS connection to
+6. **TOFU (Trust On First Use)**: During `config login`, the client makes a raw TLS connection to
    the server and captures the certificate chain from the handshake.  A second connection verifies
    the chain against the built-in Mozilla/webpki root bundle to determine the trust mode:
 
@@ -358,4 +358,4 @@ Currently, there is no rate limiting implemented. Consider adding rate limiting 
    In both cases the user is shown fingerprints to verify out-of-band before confirmation.  All
    stored values are removed on `config logout`.
 
-5. **Key Format**: All X25519 keys (unsealing and ingestion) use a non-standard PEM format (raw 32-byte keys wrapped in PEM). This is NOT standard PKCS#8 format. Standard tools like `openssl` may not recognize this format, but it works correctly with SnpGuard.
+7. **Key Format**: All X25519 keys (unsealing and ingestion) use a non-standard PEM format (raw 32-byte keys wrapped in PEM). This is NOT standard PKCS#8 format. Standard tools like `openssl` may not recognize this format, but it works correctly with SnpGuard.
