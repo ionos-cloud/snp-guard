@@ -67,11 +67,28 @@ manage measurements.
   administrators to view and register images, launch artifacts, and
   manage API tokens.
 
-* **Remote Attestation:** On boot, the client (running in the initrd)
+* **Online Attestation:** On boot, the client (running in the initrd)
   generates an AMD SEV-SNP attestation report. The SnpGuard Server
   verifies this report against the registered measurements and
   securely releases the volume master key (VMK) by encrypting it with
-  a user's ephemeral session key.
+  a user's ephemeral session key. Network access is required on every
+  boot.
+
+* **Offline Attestation:** An optional mode where a hardware-bound key
+  derived from the AMD chip and the launch measurement is enrolled into
+  a second LUKS slot after the first successful online attestation.
+  Subsequent boots unlock the disk without any network access. Online
+  attestation is used automatically as a fallback on first boot, after
+  chip migration, or after an artifact renewal.
+
+* **Attestation Renewal:** Kernel, initrd, or firmware updates produce
+  a new measurement, which would normally require re-encrypting the
+  disk from scratch. Instead, `snpguard-client attest renew` (run from
+  inside the live VM) uploads the new artifacts to a pending record on
+  the server and writes them to the inactive A/B slot on the
+  `LAUNCH_ARTIFACTS` partition. On the next boot the new measurement is
+  attested and the pending record is promoted, making the update fully
+  atomic and verifiable.
 
 ## Quick Start
 
@@ -151,13 +168,23 @@ from Ubuntu Noble (Ubuntu 24.04).
 installed on the system for the `convert` subcommand to inspecet and
 modify the QCOW2 image.
 
-**Note 3:** The image tool lists the available kernels and initrd
+**Note 3 (offline attestation):** By default the VM contacts the
+attestation server on every boot. Pass `--offline-attestation` to
+`snpguard-image convert` to inject the offline attestation hook
+instead. After the first successful online boot a hardware-bound key
+derived from the AMD SEV-SNP chip and the launch measurement is
+enrolled into a second LUKS slot. Subsequent boots unlock the disk
+without any network access, falling back to online attestation only
+when the chip changes (e.g. after VM migration) or after a kernel or
+initrd update is enrolled via `attest renew`.
+
+**Note 4:** The image tool lists the available kernels and initrd
 images with their kernel parameters. By default, the GRUB default
 kernel is selected automatically; if no default is set in the GRUB
 configuration, the first SEV-SNP supported entry is used. Pass
 `--interactive` to be prompted to choose interactively instead.
 
-**Note 4:** The OVMF firmware binary must include `SNP_KERNEL_HASHES`,
+**Note 5:** The OVMF firmware binary must include `SNP_KERNEL_HASHES`,
 which is achieved by the special AmdSevX64 build. Refer to [this
 guide](https://rouming.github.io/2025/04/01/coco-with-amd-sev.html#guest-ovmf-firmware)
 to build OVMF with `SNP_KERNEL_HASHES` enabled.
@@ -207,9 +234,16 @@ artifacts are written to the inactive directory (e.g., `/B`), then the
 symlink is atomically switched to point to the new directory. On the
 next VM poweroff/poweron cycle, the new artifacts will be used.
 
-**Note**: The embed command requires `qemu-img` and `libguestfs` to be installed,
-same as the `convert` subcommand. This step is optional - you can still provide
-artifacts externally when launching the VM.
+**Note 1**: The embed command requires `qemu-img` and `libguestfs` to be installed,
+same as the `convert` subcommand.
+
+**Note 2**: This step is optional if you supply artifacts externally
+when launching the VM. However, the `LAUNCH_ARTIFACTS` partition is
+required if you want to use `snpguard-client attest renew` from inside
+the running VM: that command writes updated kernel and initrd into the
+inactive slot and flips the active symlink, so the next boot picks up
+the new artifacts. Without this partition, artifact renewal is not
+possible.
 
 ### 6. Run CVM
 
