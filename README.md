@@ -1,24 +1,24 @@
 # SnpGuard - SEV-SNP Attestation Service
 
-**Zero-friction bootstrapping for AMD SEV-SNP Confidential VMs.**
+**Attestation service and key broker for AMD SEV-SNP Confidential VMs.**
 
-SnpGuard is a toolchain and attestation service designed to turn
-standard cloud images into Confidential VMs (CVMs) without complex
-manual configuration. It automates the lifecycle of measuring boot
-artifacts, encrypting disks, and securely releasing keys during the
-pre-boot phase.
+SnpGuard is a transparent, user-controlled attestation and key broker
+for VM-level confidential computing, covering the full lifecycle from
+image conversion through measurement, key release, and artifact
+updates. Hyperscalers either abstract this process away or leave it to
+the user; SnpGuard makes every step explicit and auditable.
 
 ## Motivation
 
 While libraries for SNP exist (thanks to
 [VirTEE](https://virtee.io/)), the ecosystem lacks an end-to-end
-toolchain for bootstrapping and attestating confidential
-VMs. Currently, operators must stitch together image builders,
-measurement calculators, and key brokers manually. `snp-guard` unifies
-this into a binding workflow: `convert` -> `register` -> `boot` (with
-optional `embed` step). It is designed specifically to fill the
-IaaS/VM bootstrapping gap that heavier container-focused solutions
-overlook.
+toolchain for bootstrapping and attesting confidential VMs. Currently,
+operators must stitch together image builders, measurement
+calculators, and key brokers manually. `snp-guard` unifies this into a
+binding workflow: `convert` -> `register` -> `boot` (with optional
+`embed` step). It is designed specifically for the VM image lifecycle,
+complementing container-focused solutions such as Confidential
+Containers that operate at a different abstraction level.
 
 ## The Problem
 
@@ -141,10 +141,10 @@ cargo run --bin snpguard-client config login \
 ### 3. Image Conversion
 
 Download a standard cloud image and convert it to a confidential-ready
-image. This process uses **qemu-img** and **libguestfs** to perform
-surgical, offline manipulation of the QCOW2 image, including root
-filesystem encryption (LUKS), partition management, and injecting the
-attestation agent into the initrd.
+image. This process uses **qemu-img** and **libguestfs** to perform offline
+manipulation of the QCOW2 image: root filesystem encryption (LUKS),
+partition management, and injecting the attestation agent into the
+initrd.
 
 ```bash
 # Download latest Debian trixie
@@ -165,7 +165,7 @@ distribution (Debian 13). Ubuntu introduced SEV-SNP support starting
 from Ubuntu Noble (Ubuntu 24.04).
 
 **Note 2**: The image tool requires `qemu-img` and `libguestfs` to be
-installed on the system for the `convert` subcommand to inspecet and
+installed on the system for the `convert` subcommand to inspect and
 modify the QCOW2 image.
 
 **Note 3 (offline attestation):** By default the VM contacts the
