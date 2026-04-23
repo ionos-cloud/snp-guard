@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 IONOS SE
+// Author: Roman Penyaev <r.peniaev@gmail.com>
+
 use regex::Regex;
 use std::collections::HashSet;
 use std::io::{self, BufRead};

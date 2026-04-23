@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 IONOS SE
+// Author: Roman Penyaev <r.peniaev@gmail.com>
+
 use anyhow::{anyhow, bail, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;

@@ -1,4 +1,8 @@
 #!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 IONOS SE
+# Author: Roman Penyaev <r.peniaev@gmail.com>
+
 # OFFLINE ATTESTATION SCRIPT
 # ===========================
 # Attempts to unseal the rootfs using a hardware-bound key derived from the

@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 IONOS SE
+// Author: Roman Penyaev <r.peniaev@gmail.com>
+
 use anyhow::{anyhow, bail, Context, Result};
 use boot::sev::{check_sev_support_live, kernel_version_from_path};
 use clap::{Parser, Subcommand};

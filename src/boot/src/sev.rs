@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 IONOS SE
+// Author: Roman Penyaev <r.peniaev@gmail.com>
+
 use std::fs;
 use std::io;
 use std::path::Path;

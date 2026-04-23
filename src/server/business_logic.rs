@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 IONOS SE
+// Author: Roman Penyaev <r.peniaev@gmail.com>
+
 use crate::{config::DataPaths, ingestion_key, snpguest_wrapper};
 use entity::{vm, vm_registration};
 use openssl::ec::{EcGroup, EcKey};

@@ -1,4 +1,8 @@
 #!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 IONOS SE
+# Author: Roman Penyaev <r.peniaev@gmail.com>
+
 # ONLINE ATTESTATION SCRIPT
 # ==========================
 # Unseals the rootfs VMK by performing a full remote attestation handshake
