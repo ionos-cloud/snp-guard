@@ -1,3 +1,3 @@
 [submodule "snpguest"]
 	path = snpguest
-	url = https://github.com/virtee/snpguest.git
+	url = https://github.com/rouming/snpguest.git
