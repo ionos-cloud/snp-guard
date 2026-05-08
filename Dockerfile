@@ -30,8 +30,8 @@ RUN cargo build --release --bin snpguard-server
 # Build and install snpguest (static, MUSL)
 # Fetched directly from git at the pinned commit so the build works whether
 # or not the git submodule was initialised
-RUN cargo install --git https://github.com/virtee/snpguest.git \
-    --rev 19fc1af1a6673015a0e70eeb88b6a796196ade93 \
+RUN cargo install --git https://github.com/rouming/snpguest.git \
+    --rev 206f776e2407bac8dbce70836da9df0e883dc55f \
     --root /usr/local \
     snpguest
 
