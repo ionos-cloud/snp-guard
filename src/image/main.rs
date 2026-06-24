@@ -361,6 +361,13 @@ fn create_guestfs_context(
     g.launch()
         .map_err(|e| anyhow!("Failed to launch guestfs: {:?}", e))?;
 
+    // Set a known-good nameserver in the appliance.  The guestfs daemon copies
+    // the appliance /etc/resolv.conf into the guest before each g.sh() call,
+    // so setting it once here gives every subsequent call working DNS without
+    // a per-command resolv.conf hack in the guest shell.
+    g.debug("sh", &["echo nameserver 1.1.1.1 > /etc/resolv.conf"])
+        .map_err(|e| anyhow!("Failed to set appliance nameserver: {:?}", e))?;
+
     // Inspect source and target and find rootfs
     let roots = g
         .inspect_os()
@@ -1255,65 +1262,55 @@ fn install_snpguard_on_target(
     }
 
     // Installation and update commands
-    let (install_cmds, update_cmd): (Vec<String>, Vec<String>) = match dist_family {
-        DistroFamily::Debian | DistroFamily::Ubuntu => {
-            let mut install = vec![
-                // brings the whole network up
-                "dhcpcd -1 eth0".to_string(),
-                // super important to have this here, see a big comment below
-                "echo nameserver 1.1.1.1 > /etc/resolv.conf".to_string(),
-                "apt update -y".to_string(),
-                "apt install -y cryptsetup cryptsetup-initramfs".to_string(),
-            ];
-
-            // Compute extra kernel module packages for Ubuntu
-            let extra_modules_pkg = if dist_family == DistroFamily::Ubuntu {
-                let mut seen = HashSet::new();
-                for kernel in supported_kernels {
-                    let version = kernel_version_from_path(kernel)
-                        .map_err(|e| anyhow!("Failed to extract kernel version: {}", e))?;
-                    seen.insert(version);
-                }
-                seen.iter()
-                    .map(|s| format!("linux-modules-extra-{s}"))
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            } else {
-                String::new()
-            };
-
-            // Extra modules
-            if !extra_modules_pkg.is_empty() {
-                install.push(format!("apt install -y {}", extra_modules_pkg));
-            }
-
-            // Update initramfs grub. Order matters: initramfs first so
-            let update = vec![
-                "update-initramfs -u -k all".to_string(),
-                "update-grub".to_string(),
-            ];
-
-            (install, update)
+    // Compute extra kernel module packages for Ubuntu before the match so it
+    // is available for the separate install step below.
+    let extra_modules_pkg = if dist_family == DistroFamily::Ubuntu {
+        let mut seen = HashSet::new();
+        for kernel in supported_kernels {
+            let version = kernel_version_from_path(kernel)
+                .map_err(|e| anyhow!("Failed to extract kernel version: {}", e))?;
+            seen.insert(version);
         }
+        seen.iter()
+            .map(|s| format!("linux-modules-extra-{s}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    } else {
+        String::new()
+    };
+
+    let (install_cmds, update_cmds): (Vec<&str>, Vec<&str>) = match dist_family {
+        DistroFamily::Debian | DistroFamily::Ubuntu => (
+            vec![
+                // --nohook resolv.conf: the appliance nameserver (1.1.1.1) is
+                // already in /etc/resolv.conf; dhcpcd would overwrite it with
+                // the DHCP-provided DNS, so we suppress that hook.
+                "dhcpcd -1 --nohook resolv.conf eth0",
+                "apt update -y",
+                "apt install -y cryptsetup cryptsetup-initramfs",
+            ],
+            vec!["update-initramfs -u -k all", "update-grub"],
+        ),
         DistroFamily::RedHat => bail!("RedHat distributions are not supported at the moment"),
     };
 
-    // Run install commands in one command. Why join? Each command is
-    // not just a command; it is a set of preparations and cleaning
-    // routines done by the guestfs daemon. For example, on each
-    // command call a copy of /etc/resolv.conf from the appliance VM
-    // to rootfs occurs. Therefore, if you update /etc/resolv.conf
-    // inside rootfs in a separate command, the file will be
-    // immediately overwritten. I encountered a situation where
-    // /etc/resolv.conf was missing in the appliance VM (not sure if
-    // that's a bug or feature), but the result was that every command
-    // should be joined in a pipeline; otherwise, there's no DNS
-    // resolving.
-    let cmd = install_cmds.join("; ");
-    let _out = g
-        .sh(&cmd)
-        .map_err(|e| anyhow!("Failed to execute '{}': {:?}", cmd, e))?;
-    //println!("{}", _out);
+    for cmd in install_cmds {
+        g.sh(cmd)
+            .map_err(|e| anyhow!("Failed to execute '{}': {:?}", cmd, e))?;
+    }
+
+    if !extra_modules_pkg.is_empty() {
+        g.sh(&format!("apt-get install --dry-run -y {}", extra_modules_pkg))
+            .map_err(|_| anyhow!(
+                "{} is not available in apt. \
+                 The kernel in this image is likely outdated: its extra-modules \
+                 package is no longer in the repository. \
+                 Please provide a newer base image.",
+                extra_modules_pkg
+            ))?;
+        g.sh(&format!("apt install -y {}", extra_modules_pkg))
+            .map_err(|e| anyhow!("Failed to install {}: {:?}", extra_modules_pkg, e))?;
+    }
 
     // Configure grub, fstab for the encrypted root.
     // Called after packages so cryptsetup-initramfs is available, and before
@@ -1332,12 +1329,10 @@ fn install_snpguard_on_target(
         local_top_path,
     )?;
 
-    // Run update commands
-    let cmd = update_cmd.join("; ");
-    let _out = g
-        .sh(&cmd)
-        .map_err(|e| anyhow!("Failed to execute '{}': {:?}", cmd, e))?;
-    //println!("{}", _out);
+    for cmd in update_cmds {
+        g.sh(cmd)
+            .map_err(|e| anyhow!("Failed to execute '{}': {:?}", cmd, e))?;
+    }
 
     Ok(())
 }
