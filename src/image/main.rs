@@ -987,16 +987,11 @@ fn encrypt_and_copy_rootfs(
     g.luks_format(target_rootfs, &luks_key, 0)
         .map_err(|e| anyhow!("Failed to format LUKS: {:?}", e))?;
 
-    g.luks_open(target_rootfs, &luks_key, "cryptroot")
-        .map_err(|e| anyhow!("Failed to open LUKS: {:?}", e))?;
-    defer! {
-        if let Err(e) = g.luks_close("/dev/mapper/cryptroot") {
-            println!("WARN: Failed to close LUKS: {:?}", e);
-        }
-    }
-
-    // Use cryptsetup directly from the debug API because the guestfs
-    // Rust binding does not expose the --label option.
+    // Set the LUKS label before luks_open: once dm-crypt holds the device via
+    // bd_link_disk_holder, cryptsetup config cannot reopen the raw partition for
+    // header modification (fails with "does not exist or access denied" on newer
+    // kernel + cryptsetup 2.7+).  The guestfs Rust binding has no native
+    // luks_set_label, so we fall back to the debug sh API.
     g.debug(
         "sh",
         &[&format!(
@@ -1005,6 +1000,14 @@ fn encrypt_and_copy_rootfs(
         )],
     )
     .map_err(|e| anyhow!("Failed to assign label for LUKS: {:?}", e))?;
+
+    g.luks_open(target_rootfs, &luks_key, "cryptroot")
+        .map_err(|e| anyhow!("Failed to open LUKS: {:?}", e))?;
+    defer! {
+        if let Err(e) = g.luks_close("/dev/mapper/cryptroot") {
+            println!("WARN: Failed to close LUKS: {:?}", e);
+        }
+    }
 
     // Copy the source rootfs label to the target rootfs
     let rootfs_label = g
