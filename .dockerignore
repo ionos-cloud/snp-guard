@@ -32,6 +32,17 @@ docker-compose.yml
 # CI/CD
 .github/
 
-# Temporary files
+# Temporary files and folders
 *.tmp
 *.log
+tmp/
+
+# Large binary/image files not needed for the build
+*.qcow2
+*.img
+*.fd
+*.ext4
+*.tar.gz
+*.patch
+*.pptx
+staging/
