@@ -12,6 +12,7 @@ use axum_server::tls_rustls::RustlsConfig;
 use clap::Parser;
 use rand::RngCore;
 use rustls::crypto::ring::default_provider as ring_crypto_provider;
+use migration::{Migrator, MigratorTrait};
 use sea_orm::Database;
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -76,6 +77,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // DB
     let conn = Database::connect(db_url).await?;
+    Migrator::up(&conn, None).await?;
 
     // Attestation state (shared between endpoints)
     let mut secret = [0u8; 32];
