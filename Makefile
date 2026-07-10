@@ -9,7 +9,6 @@ else
   PROFILE_FLAG := --release
 endif
 DATA_DIR ?= ./data
-DB_URL := sqlite://$(DATA_DIR)/db/snpguard.sqlite?mode=rwc
 CLIENT_TARGET := x86_64-unknown-linux-musl
 
 .PHONY: all build build-server build-client build-image build-snpguest clean help
